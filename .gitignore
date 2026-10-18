@@ -9,3 +9,6 @@ test-results/
 .env
 .env.*
 !.env.example
+/tests/
+/ui/assets/*
+!/ui/assets/README.md

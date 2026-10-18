@@ -55,11 +55,13 @@
 | CMake / Ninja / aqtinstall | 4.4.4 / 1.13.2 / 3.3.0，见 `requirements-build.txt` |
 | C++ | C++20，Release 构建 |
 
-本机重建和测试：
+普通构建（克隆仓库后可直接使用）：
 
 ```powershell
-.\Build.ps1 -Test
+.\Build.ps1
 ```
+
+测试代码与测试配置仅在本地 `tests/` 中维护，不上传仓库。本地具备这些文件时可使用 `./Build.ps1 -Test`；普通构建默认关闭测试，也不要求 Qt Test 组件。
 
 新开发环境安装依赖：
 
@@ -68,7 +70,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
 .\.venv\Scripts\python.exe -m aqt install-qt windows desktop 6.10.3 win64_mingw -m qtmultimedia qtimageformats -O .tools\Qt
 .\.venv\Scripts\python.exe -m aqt install-tool windows desktop tools_mingw qt.tools.win64_mingw1310 -O .tools\Qt
-.\Build.ps1 -Test
+.\Build.ps1
 ```
 
 程序使用项目中的 QML 文件和 Qt SDK，尚未制作独立安装包。需求与设计描述完整产品目标；已实现范围以本页和[开发进度](08-development.md)为准。

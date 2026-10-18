@@ -4,7 +4,7 @@
 
 验证对象：原生功能版 0.1.0；Windows 本机、Qt 6.10.3、MinGW 13.1.0、Release 构建。核心自动化测试和已列出的原生窗口流程通过。尚未完成产品 A1—A23 全量验收。
 
-测试使用临时目录、生成图片及项目示例图片副本，不操作用户素材。可重复命令：在项目根目录执行 `./Build.ps1 -Test`。测试实现位于 `tests/core_tests.cpp` 和 `tests/ui_tests.cpp`，CTest 日志位于 `build/Testing/Temporary/LastTest.log`。
+测试使用临时目录、生成图片及项目示例图片副本，不操作用户素材。测试代码和测试配置仅保留在本地，不纳入版本控制。具备本地 `tests/` 目录时，可在项目根目录执行 `./Build.ps1 -Test`。测试实现位于 `tests/core_tests.cpp` 和 `tests/ui_tests.cpp`，CTest 日志位于 `build/Testing/Temporary/LastTest.log`。
 
 ## 自动化覆盖
 

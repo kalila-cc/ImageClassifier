@@ -6,7 +6,11 @@ $cmakeExe = Join-Path $PSScriptRoot '.venv\Scripts\cmake.exe'
 $ninjaExe = Join-Path $PSScriptRoot '.venv\Scripts\ninja.exe'
 $env:PATH = "$qtRoot\bin;$compilerRoot;$env:PATH"
 $env:QT_FORCE_STDERR_LOGGING = '1'
-& $cmakeExe -S $PSScriptRoot -B "$PSScriptRoot\build" -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninjaExe" "-DCMAKE_CXX_COMPILER=$compilerRoot\g++.exe" "-DCMAKE_PREFIX_PATH=$qtRoot" -DCMAKE_BUILD_TYPE=Release
+$localTests = if ($Test) { 'ON' } else { 'OFF' }
+if ($Test -and -not (Test-Path -LiteralPath "$PSScriptRoot\tests\CMakeLists.txt")) {
+    throw 'Local tests are not included in the repository. Run Build.ps1 without -Test.'
+}
+& $cmakeExe -S $PSScriptRoot -B "$PSScriptRoot\build" -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninjaExe" "-DCMAKE_CXX_COMPILER=$compilerRoot\g++.exe" "-DCMAKE_PREFIX_PATH=$qtRoot" -DCMAKE_BUILD_TYPE=Release "-DIMAGECLASSIFIER_BUILD_TESTS=$localTests"
 if ($LASTEXITCODE) { throw 'Configure failed' }
 & $cmakeExe --build "$PSScriptRoot\build" --parallel 6
 if ($LASTEXITCODE) { throw 'Build failed' }

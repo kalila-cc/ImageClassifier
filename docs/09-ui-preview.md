@@ -4,13 +4,14 @@
 
 ## 启动
 
-在项目根目录双击 `Preview.cmd`，或使用 PowerShell 运行 `./Start-Preview.ps1`。预览使用项目内 `.venv`，演示图片保存在 `ui/assets`，日常启动无需联网。
+在项目根目录双击 `Preview.cmd`，或使用 PowerShell 运行 `./Start-Preview.ps1`。预览使用项目内 `.venv`，演示图片仅保存在本地 `ui/assets`，不纳入版本控制；首次准备素材需要联网下载，之后启动无需联网。正式版不依赖这些图片。
 
 重新建立预览环境时，在项目根目录运行：
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-preview.txt
+.\.venv\Scripts\python.exe tools/fetch_demo.py
 .\.venv\Scripts\python.exe preview.py
 ```
 

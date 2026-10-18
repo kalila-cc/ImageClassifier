@@ -11,7 +11,7 @@ git clone https://github.com/kalila-cc/ImageClassifier.git
 cd ImageClassifier
 ```
 
-按[构建环境说明](docs/10-running.md#构建环境)安装 Qt、MinGW 和构建工具，再执行 `./Build.ps1 -Test`。仓库不包含本地 SDK、虚拟环境、编译产物、运行日志或个人图库数据库。
+按[构建环境说明](docs/10-running.md#构建环境)安装 Qt、MinGW 和构建工具，再执行 `./Build.ps1`。测试仅在本地维护和运行；示例图片也不纳入版本控制。仓库不包含本地 SDK、虚拟环境、编译产物、运行日志或个人图库数据库。正式版不依赖示例图片，独立 UI 演示的素材准备见[预览说明](docs/09-ui-preview.md)。
 
 - [使用及构建](docs/10-running.md)
 - [开发进度](docs/08-development.md)
