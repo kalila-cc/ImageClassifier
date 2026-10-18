@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.log
+preview-capture.png
+.tools/
+build/
+test-results/
+*.sqlite*
+.env
+.env.*
+!.env.example
