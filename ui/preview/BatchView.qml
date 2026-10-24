@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import ".."
 
 ColumnLayout {
     id: batch
@@ -43,10 +44,10 @@ ColumnLayout {
         cellWidth: width / columns; cellHeight: cellWidth * .73 + 36
         model: batch.photos
         ScrollBar.vertical: ScrollBar { width: 6; policy: ScrollBar.AsNeeded }
-        delegate: PhotoCard {
+        delegate: PreviewPhotoCard {
             required property var modelData
             width: grid.cellWidth - 10; height: grid.cellHeight - 10
-            photo: "assets/photo-" + (modelData.id < 10 ? "0" : "") + modelData.id + ".jpg"
+            photo: Qt.resolvedUrl("assets/photo-" + (modelData.id < 10 ? "0" : "") + modelData.id + ".jpg")
             filename: modelData.name; kind: modelData.kind
             selected: batch.selection.includes(modelData.id); focused: batch.focusPhoto === modelData.id
             onClicked: batch.togglePhoto(modelData.id)

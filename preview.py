@@ -12,7 +12,7 @@ app.setApplicationName("ImageClassifier Preview")
 app.setFont(QFont("Microsoft YaHei UI", 10))
 engine = QQmlApplicationEngine()
 engine.warnings.connect(lambda warnings: print("\n".join(w.toString() for w in warnings), flush=True))
-engine.load(QUrl.fromLocalFile(str(Path(__file__).parent / "ui" / "Main.qml")))
+engine.load(QUrl.fromLocalFile(str(Path(__file__).parent / "ui" / "preview" / "Main.qml")))
 if not engine.rootObjects():
     sys.exit(1)
 sys.exit(app.exec())

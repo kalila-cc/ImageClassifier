@@ -36,12 +36,29 @@ QVariantMap CropGeometry::constrain(const QVariantMap &requested,const QVariantM
         const auto center=desired.center();
         desired.setHeight(desired.width()/ratio);desired.moveCenter(center);
     }
+    const auto before=pixels(previous);
+    const bool compatiblePrevious=!previous.isEmpty() && previous.value("angle").toDouble()==angle &&
+        previous.value("ratio").toDouble()==ratio && contains(before,inset);
+    if(compatiblePrevious && std::abs(desired.width()-before.width())<1e-6 &&
+       std::abs(desired.height()-before.height())<1e-6) {
+        // For a translation, feasible centers form a rectangle in source space.
+        // Project onto that rectangle instead of stopping the entire motion at
+        // the first edge; this preserves the component parallel to that edge.
+        const auto extent=inverse.mapRect(QRectF(QPointF(0,0),desired.size())).size()/2;
+        const double left=inset+extent.width(),right=source.width()-inset-extent.width();
+        const double top=inset+extent.height(),bottom=source.height()-inset-extent.height();
+        if(left<=right+1e-6 && top<=bottom+1e-6) {
+            auto center=inverse.map(desired.center());
+            center.setX(left>right?(left+right)/2:std::clamp(center.x(),left,right));
+            center.setY(top>bottom?(top+bottom)/2:std::clamp(center.y(),top,bottom));
+            desired.moveCenter(forward.map(center));
+        }
+    }
     if(!contains(desired,inset)) {
-        // Dragging interpolates from the last valid rectangle: translation keeps
-        // its size, resizing keeps the opposite corner. Rotation starts at center.
+        // Resizing interpolates from the last valid rectangle to keep its fixed
+        // anchor. Rotation and initial fitting start at the image center.
         QRectF start(forward.map(QPointF(source.width()/2.0,source.height()/2.0)),QSizeF(0,0));
-        if(!previous.isEmpty() && previous.value("angle").toDouble()==angle &&
-           previous.value("ratio").toDouble()==ratio && contains(pixels(previous),inset))start=pixels(previous);
+        if(compatiblePrevious)start=before;
         auto at=[&](double t){return QRectF(start.x()+(desired.x()-start.x())*t,start.y()+(desired.y()-start.y())*t,
                                            start.width()+(desired.width()-start.width())*t,start.height()+(desired.height()-start.height())*t);};
         double low=0,high=1;

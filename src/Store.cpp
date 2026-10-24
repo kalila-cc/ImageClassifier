@@ -21,7 +21,10 @@ Store::Store(const QString &path) {
     exec("CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,path TEXT NOT NULL UNIQUE,root TEXT NOT NULL,size INTEGER,mtime INTEGER,type TEXT,blocked TEXT DEFAULT '')");
     exec("CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,kind TEXT NOT NULL,source TEXT,target TEXT,temp TEXT,sha TEXT,size INTEGER,mtime INTEGER,identity TEXT,state TEXT NOT NULL,error TEXT DEFAULT '',parent TEXT DEFAULT '',created TEXT DEFAULT CURRENT_TIMESTAMP)");
     exec("CREATE INDEX IF NOT EXISTS operations_state ON operations(state)");
+    exec("CREATE TABLE IF NOT EXISTS cleared_history(operation TEXT PRIMARY KEY)");
     exec("CREATE TABLE IF NOT EXISTS drafts(asset TEXT PRIMARY KEY,stamp TEXT NOT NULL,json TEXT NOT NULL)");
+    exec("CREATE TABLE IF NOT EXISTS live_metadata(path TEXT PRIMARY KEY,size INTEGER,mtime INTEGER,identifier TEXT NOT NULL)");
+    exec("CREATE TABLE IF NOT EXISTS live_members(group_id TEXT,position INTEGER,source TEXT,target TEXT,sha TEXT,size INTEGER,mtime INTEGER,identity TEXT,PRIMARY KEY(group_id,position))");
     exec("PRAGMA user_version=1");
 }
 Store::~Store() { db.close(); db = QSqlDatabase(); QSqlDatabase::removeDatabase(connection); }

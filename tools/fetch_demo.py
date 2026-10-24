@@ -2,7 +2,7 @@
 from pathlib import Path
 from urllib.request import urlopen, Request
 from concurrent.futures import ThreadPoolExecutor
-ROOT = Path(__file__).resolve().parents[1] / 'ui' / 'assets'
+ROOT = Path(__file__).resolve().parents[1] / 'ui' / 'preview' / 'assets'
 ROOT.mkdir(parents=True, exist_ok=True)
 IDS = [1015, 1016, 1039, 1043, 1040, 1036, 1020, 1024, 1025, 1041, 1042, 1050]
 def fetch(item):

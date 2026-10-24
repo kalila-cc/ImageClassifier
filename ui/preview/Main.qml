@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import ".."
 
 ApplicationWindow {
     id: app
@@ -67,7 +68,11 @@ ApplicationWindow {
             Layout.fillWidth: true; Layout.preferredHeight: 58; color: "#ffffff"
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 20; anchors.rightMargin: 18; spacing: 12
-                Rectangle { width: 29; height: 29; radius: 7; color: "#285c49"; Glyph { anchors.centerIn: parent; name: "image"; ink: "white"; width: 21; height: 21 } }
+                Image {
+                    Layout.minimumWidth:28;Layout.preferredWidth:28;Layout.maximumWidth:28
+                    Layout.minimumHeight:28;Layout.preferredHeight:28;Layout.maximumHeight:28
+                    source:"../brand/guitu-mark.svg";sourceSize:Qt.size(84,84);fillMode:Image.PreserveAspectFit
+                }
                 Text { text: "归图"; font.pixelSize: 17; font.weight: Font.DemiBold; color: "#2c4436" }
                 Rectangle { width: 1; height: 22; color: "#e0e5dc"; Layout.leftMargin: 8; Layout.rightMargin: 4 }
                 UiButton { text: "春日随拍  ▾"; quiet: true; onClicked: sources.open() }
@@ -111,7 +116,7 @@ ApplicationWindow {
                     Item { Layout.fillHeight: true }
                     UiButton { Layout.fillWidth: true; text: "目录管理  ···"; quiet: true; onClicked: app.notify("目录改名、移动等操作尚未接入") }
                     Rectangle { Layout.fillWidth: true; height: 1; color: "#dce3d5"; Layout.topMargin: 5; Layout.bottomMargin: 5 }
-                    UiButton { Layout.fillWidth: true; text: "已处理原图"; quiet: true; onClicked: app.notify("已处理目录尚未接入") }
+                    UiButton { Layout.fillWidth: true; text: "刷新目录"; quiet: true; onClicked: app.notify("预览：目录刷新尚未接入") }
                 }
                 Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: "#dfe5da" }
             }
@@ -150,7 +155,7 @@ ApplicationWindow {
                         Item { Layout.fillWidth: true }
                         Glyph { name: "folder"; width: 18; height: 18; ink: "#6a805e" }
                         Text { text: app.largeMode && viewer.cropActive ? "子图分别归类" : app.targetPath; color: "#4e6444"; font.pixelSize: 13 }
-                        UiButton { text: app.largeMode ? (viewer.cropActive ? "保存子图并归档原图  →" : "归类当前图片  →") : "归类所选 " + app.selection.length + " 项  →"; primary: true; implicitHeight: 40; Layout.leftMargin: 8; enabled: app.largeMode ? app.visiblePhotos.length > 0 : app.selection.length > 0; onClicked: { if(app.largeMode && viewer.cropActive) app.notify("预览：未导出子图，也未移动原图"); else app.classify() } }
+                        UiButton { text: app.largeMode ? (viewer.cropActive ? "仅裁剪  →" : "归类当前图片  →") : "归类所选 " + app.selection.length + " 项  →"; primary: true; implicitHeight: 40; Layout.leftMargin: 8; enabled: app.largeMode ? app.visiblePhotos.length > 0 : app.selection.length > 0; onClicked: { if(app.largeMode && viewer.cropActive) app.notify("预览：未导出子图，也未移动原图"); else app.classify() } }
                     }
                 }
             }

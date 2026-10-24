@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import ".."
 
 ColumnLayout {
     id: viewer
@@ -121,7 +122,7 @@ ColumnLayout {
                             MouseArea { anchors.fill: parent; onClicked: viewer.notice("子图目标选择尚未接入") }
                         }
                     }
-                    Text { text: "原图 → 已处理"; color: "#819373"; font.pixelSize: 11 }
+                    Text { text: "裁剪后保留原图"; color: "#819373"; font.pixelSize: 11 }
                 }
             }
         }

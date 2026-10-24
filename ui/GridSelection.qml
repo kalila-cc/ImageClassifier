@@ -11,6 +11,7 @@ Item {
     property bool gestureCancelled: false
     property bool wasDragging: false
     property int pressedIndex: -1
+    property string pressedId: ""
     readonly property bool rangeGesture: pressedIndex >= 0
     property real anchorX: 0
     property real anchorY: 0
@@ -29,11 +30,15 @@ Item {
     z: 10
 
     function indexAt(x, y) {
-        const px=x+gridView.contentX, py=y+gridView.contentY;
-        const column=Math.floor(px/gridView.cellWidth), row=Math.floor(py/gridView.cellHeight);
-        const index=row*gridView.columns+column;
-        if(column<0||column>=gridView.columns||row<0||index>=records.length)return -1;
-        if(px-column*gridView.cellWidth>gridView.cellWidth-cardGap||py-row*gridView.cellHeight>gridView.cellHeight-cardGap)return -1;
+        // GridView can move its origin after resizing, filtering or removing rows.
+        // Hit-test the rendered delegate instead of assuming row zero starts at y=0.
+        const point=gridView.contentItem.mapFromItem(selectionArea,x,y);
+        const index=gridView.indexAt(point.x,point.y);
+        if(index<0||index>=records.length)return -1;
+        const card=gridView.itemAtIndex(index);
+        if(!card)return -1;
+        const local=card.mapFromItem(selectionArea,x,y);
+        if(local.x<0||local.y<0||local.x>=card.width||local.y>=card.height)return -1;
         return index;
     }
     function updateSelection() {
@@ -45,7 +50,7 @@ Item {
             // A drag starting on a photo follows display order, like selecting
             // text across lines. Gaps and the incomplete last row clamp to a card.
             const column=Math.max(0,Math.min(gridView.columns-1,Math.floor(endX/gridView.cellWidth)));
-            const row=Math.max(0,Math.floor(endY/gridView.cellHeight));
+            const row=Math.max(0,Math.floor((endY-gridView.originY)/gridView.cellHeight));
             const last=Math.min(records.length-1,row*gridView.columns+column);
             for(let i=Math.min(pressedIndex,last);i<=Math.max(pressedIndex,last);++i)ids.add(records[i].id);
             selectionRequested(Array.from(ids));
@@ -55,7 +60,7 @@ Item {
         const top=Math.min(anchorY,endY),bottom=Math.max(anchorY,endY);
         for(let i=0;i<records.length;++i) {
             const x=(i%gridView.columns)*gridView.cellWidth;
-            const y=Math.floor(i/gridView.columns)*gridView.cellHeight;
+            const y=gridView.originY+Math.floor(i/gridView.columns)*gridView.cellHeight;
             if(x<=right&&x+gridView.cellWidth-cardGap>=left&&y<=bottom&&y+gridView.cellHeight-cardGap>=top)ids.add(records[i].id);
         }
         selectionRequested(Array.from(ids));
@@ -93,14 +98,20 @@ Item {
         scrollGestureEnabled: false
         onWheel: wheel=>{wheel.accepted=false}
         onPressed: mouse=>{
+            const index=selectionArea.indexAt(mouse.x,mouse.y);
+            const card=index>=0?selectionArea.gridView.itemAtIndex(index):null;
+            if(card&&typeof card.playbackControlAt==="function"&&card.playbackControlAt(selectionMouse,mouse.x,mouse.y)) {
+                mouse.accepted=false;return;
+            }
             selectionArea.priorSelection=selectionArea.selectedIds.slice();
             selectionArea.dragging=false;selectionArea.wasDragging=false;selectionArea.gestureCancelled=false;
             selectionArea.pressedIndex=selectionArea.indexAt(mouse.x,mouse.y);
+            selectionArea.pressedId=selectionArea.pressedIndex>=0?selectionArea.records[selectionArea.pressedIndex].id:"";
             selectionArea.pressX=mouse.x;selectionArea.pressY=mouse.y;
             selectionArea.pointerX=mouse.x;selectionArea.pointerY=mouse.y;
             selectionArea.anchorX=mouse.x+selectionArea.gridView.contentX;
             selectionArea.anchorY=mouse.y+selectionArea.gridView.contentY;
-            if(selectionArea.pressedIndex>=0)selectionArea.focusRequested(selectionArea.records[selectionArea.pressedIndex].id);
+            if(selectionArea.pressedId)selectionArea.focusRequested(selectionArea.pressedId);
         }
         onPositionChanged: mouse=>{
             if(!pressed||selectionArea.gestureCancelled)return;
@@ -117,15 +128,16 @@ Item {
         }
         onClicked: mouse=>{
             if(selectionArea.wasDragging||selectionArea.gestureCancelled||selectionArea.pressedIndex<0)return;
-            const id=selectionArea.records[selectionArea.pressedIndex].id;
+            const id=selectionArea.pressedId;
             const ids=selectionArea.selectedIds.slice(),index=ids.indexOf(id);
             if(index>=0)ids.splice(index,1);else ids.push(id);
             selectionArea.selectionRequested(ids);
         }
         onDoubleClicked: mouse=>{
-            if(selectionArea.pressedIndex>=0&&!selectionArea.wasDragging){
+            const index=selectionArea.indexAt(mouse.x,mouse.y);
+            if(index>=0&&!selectionArea.wasDragging&&!selectionArea.gestureCancelled&&selectionArea.records[index].id===selectionArea.pressedId){
                 selectionArea.gestureCancelled=true;
-                selectionArea.activated(selectionArea.records[selectionArea.pressedIndex].id);
+                selectionArea.activated(selectionArea.pressedId);
             }
         }
         onCanceled: selectionArea.cancelGesture()
