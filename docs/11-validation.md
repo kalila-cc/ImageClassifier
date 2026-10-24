@@ -6,11 +6,23 @@
 
 测试使用临时目录、生成图片及隔离的人像图片副本，不修改用户素材。测试代码和测试配置仅保留在本地，不纳入版本控制。具备本地 `tests/` 目录时，可在项目根目录执行 `./Build.ps1 -Test`。测试实现包括核心服务、界面交互、工作区打磨、智能裁剪、实况图及隔离重启进程；CTest 日志位于 `build/Testing/Temporary/LastTest.log`。
 
-2026-10-25 提交前，应用与全部测试目标构建通过；CTest 7/7 通过，总用时 139.73 秒，离屏应用 `--smoke` 退出码为 0。验证使用 `QT_QPA_PLATFORM=offscreen`，不启动前台应用或移动用户鼠标。完整回归日志见 `.tools/publish-regression.txt`，启动日志见 `.tools/publish-smoke.txt`。损坏图片或视频用例会产生预期的解码告警，离屏环境可能输出 CPU 帧转换与字体调试信息；这些输出未造成测试失败或 QML 加载错误。
+2026-10-25 本轮目录管理与浏览体验改进提交前，应用与全部测试目标构建通过；CTest 7/7 通过，总用时 152.74 秒，离屏应用 `--smoke` 退出码为 0。验证使用 `QT_QPA_PLATFORM=offscreen`，不启动前台应用或移动用户鼠标。完整回归日志见 `.tools/directory-publish-regression.txt`，启动日志见 `.tools/directory-publish-smoke.txt`。损坏图片或视频用例会产生预期的解码告警，离屏环境可能输出 CPU 帧转换与字体调试信息；这些输出未造成测试失败或 QML 加载错误。
 
 文案与图标核对覆盖工作区、裁剪工具、目录菜单、设置与弹窗。中文新建/取消/重命名按钮通过临时目录实际操作核对；可取消任务的提示与停止请求同步，不可取消任务不展示可点击的取消动作。目录状态标记布局调整后，额外运行三个目录交互用例通过，报告为 `.tools/semantic-review/directory-checks.txt`。
 
 ## 自动化覆盖
+
+目录删除专项通过：非空目录确认、取消保留全部内容、真实 Windows 回收站移入及临时副本恢复、列表与归类目标更新、红色菜单属性；隐藏文件判空、目录身份变化、空目录新增内容、范围及程序数据保护、回收失败和回收后中断的记录处理通过。完整核心回归 57 个功能用例通过，中文弹窗及新建目录关联用例通过。测试仅使用临时目录，报告为 `.tools/delete-directory-core-regression.txt` 和 `.tools/delete-directory-ui.txt`。
+
+切回刷新专项通过：模拟应用前后台状态验证首次激活不重复扫描、350 毫秒防抖、后台不扫描、快速切换合并、忙碌／真实弹窗／设置页延后及手动刷新合并。临时目录外部增删文件后，目录树与内容更新，当前批次、仍存在的选择、浏览项目、目标和滚动位置保持；损坏图片刷新恢复及新建目录关联用例通过。测试不切换用户桌面应用，日志为 `.tools/activation-refresh.txt`。
+
+新建目录专项通过：实际 Enter 提交后自动选为归类目标、展开收起的父目录、滚动到列表末尾的新目录并显示成功 Toast；浏览来源、图片列表和已有多选保持不变。同名及无效名称显示失败 Toast，失败或取消保留原目标；中文按钮与双击浏览的关联用例通过。日志为 `.tools/new-directory-target.txt`。
+
+目录完成标识专项通过：仅按已知直属数量为零显示；子目录含媒体的父目录仍可显示、直属有文件时隐藏、复制进入后取消、最后一项移出后恢复、统计未知或缺失时不误标。180 像素侧栏下验证长名称省略与图标不重叠。日志及截图为 `.tools/directory-complete.txt`、`.tools/directory-complete.png`。
+
+侧栏拖动专项通过：实际鼠标拖动验证宽度实时变化、上下限、重启恢复、窄窗口临时收窄及恢复、两种模式共用及多选保留；正方形网格、移动定位与切回批量动画三个关联用例通过。应用构建及隔离启动通过，日志为 `.tools/sidebar-resize.txt`、`.tools/sidebar-related-regression.txt` 和 `.tools/sidebar-smoke.txt`。
+
+批量移动增量更新与视区锚定专项通过：验证未移动卡片实例保留、任务开始与结束均不回顶部、按展示顺序定位成功移动项的后继、部分失败继续保留选择、复制及历史通知不改变位置、隐藏选择不跳转、筛选列表末尾回退及空列表。界面交互、工作区和实况媒体三个目标回归全部通过（82 个功能用例，110.19 秒），应用重新构建及隔离启动通过。日志为 `.tools/batch-move-anchor.txt`、`.tools/batch-move-regression.txt` 和 `.tools/batch-move-smoke.txt`。
 
 最终选择样式与定位提示已随本次完整回归验证：选中图片使用 5 像素白色外扩边框，相邻边重叠，图片尺寸保持不变；25×25 圆形勾选标识带细白边、白色粗勾号，与“移动”按钮共用强调色。切回批量模式的定位动画放大至 110%，总长 900 毫秒；缩放工具栏移除后，双击与 Ctrl＋滚轮交互仍通过。
 
@@ -26,7 +38,7 @@
 
 大图切换几何专项与相关回归通过：`ui_tests`、`ui_polish_tests`、`live_tests` 共 56 个功能用例，CTest 3/3、57.10 秒。使用延迟解码的测试图片核对加载期间实际像素边界，横图保持 500×250 而非被拉成 250×500；快速切图、同图高清加载、实时旋转、失败恢复及完整编辑器交互通过。报告位于 `.tools/switch-aspect-review/tests.txt` 和 `ui-regression.txt`。
 
-Qt Test 包含 55 个核心功能测试、21 个界面交互测试、42 个工作区打磨测试、5 个智能裁剪服务测试、17 个实况图与视频测试、5 个重启进程测试及 4 个模型安装测试，共 149 个功能用例。由 `core_tests`、`ui_tests`、`ui_polish_tests`、`smart_tests`、`live_tests`、`restart_tests` 和 `model_installer_tests` 七个 CTest 目标执行。缩略图尺寸定位及拖选专项报告为 `.tools/thumbnail-review/resize-tests.txt`，清空记录专项报告及截图位于 `.tools/history-review/`。个人偏好学习另有 5 个本地 Python 行为测试，其既有验证结论见智能裁剪章节。
+Qt Test 包含 57 个核心功能测试、21 个界面交互测试、50 个工作区打磨测试、5 个智能裁剪服务测试、17 个实况图与视频测试、5 个重启进程测试及 4 个模型安装测试，共 159 个功能用例。由 `core_tests`、`ui_tests`、`ui_polish_tests`、`smart_tests`、`live_tests`、`restart_tests` 和 `model_installer_tests` 七个 CTest 目标执行。缩略图尺寸定位及拖选专项报告为 `.tools/thumbnail-review/resize-tests.txt`，清空记录专项报告及截图位于 `.tools/history-review/`。个人偏好学习另有 5 个本地 Python 行为测试，其既有验证结论见智能裁剪章节。
 
 操作记录本地时间专项与历史清空回归通过：验证 UTC 到本地时间的跨日转换、存储值不变、异常时间兜底及 QML 实际显示；报告位于 `.tools/recovery-review/history-core.txt` 和 `history-ui.txt`。
 

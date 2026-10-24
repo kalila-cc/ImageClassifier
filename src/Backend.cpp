@@ -19,6 +19,7 @@
 #include <QDateTime>
 #include <QCryptographicHash>
 #include <QCollator>
+#include <QCoreApplication>
 #include <QImageWriter>
 #include <windows.h>
 #include <algorithm>
@@ -29,6 +30,10 @@ QString json(const QVariant &v) {return QString::fromUtf8(QJsonDocument::fromVar
 QVariant parse(const QString &s) {return QJsonDocument::fromJson(s.toUtf8()).toVariant();}
 QString version(const QVariantMap &a) {return a["size"].toString()+":"+a["mtime"].toString();}
 void fail(const QString &s) {throw std::runtime_error(s.toUtf8().constData());}
+bool insideDirectory(const QString &path,const QString &directory) {
+    const auto p=QDir::cleanPath(QDir::fromNativeSeparators(path)),d=QDir::cleanPath(QDir::fromNativeSeparators(directory));
+    return p.compare(d,Qt::CaseInsensitive)==0||p.startsWith(d.endsWith('/')?d:d+"/",Qt::CaseInsensitive);
+}
 // Keep recovery groups visible if any member is unfinished. Clearing the UI must
 // retain operation IDs and file hashes used by recovery and idempotent exports.
 const QString historyProtection=QStringLiteral(
@@ -111,6 +116,7 @@ Backend::Backend(const QString &db,QObject *parent):QObject(parent),database(db)
     if(themeColor.match(savedTheme.value("primary").toString()).hasMatch()&&themeColor.match(savedTheme.value("secondary").toString()).hasMatch()&&QStringList{"single","gradient"}.contains(savedTheme.value("mode").toString()))m_theme=savedTheme;
     m_cropMode=s.value("cropMode","1")=="1";
     m_thumbnailSize=qBound(170,s.value("thumbnailSize","240").toInt(),730);
+    m_sidebarWidth=qBound(180,s.value("sidebarWidth","220").toInt(),480);
     m_showFilmstrip=s.value("showFilmstrip","1")=="1";
     m_defaultRecursive=s.value("defaultRecursive","1")=="1";
     m_batchSize=qBound(10,s.value("batchSize","100").toInt(),500);
@@ -261,6 +267,11 @@ void Backend::setThumbnailSize(int size) {
     size=qBound(170,size,730);
     if(size==m_thumbnailSize||!savePreference("thumbnailSize",QString::number(size)))return;
     m_thumbnailSize=size;emit preferencesChanged();
+}
+void Backend::setSidebarWidth(int width) {
+    width=qBound(180,width,480);
+    if(width==m_sidebarWidth||!savePreference("sidebarWidth",QString::number(width)))return;
+    m_sidebarWidth=width;emit preferencesChanged();
 }
 void Backend::setShowFilmstrip(bool enabled) {
     if(enabled==m_showFilmstrip||!savePreference("showFilmstrip",enabled?"1":"0"))return;
@@ -461,12 +472,66 @@ void Backend::setTargetRoot(const QString &input) {
 }
 void Backend::createDirectory(const QString &parent,const QString &name) {
     if(m_busy)return;
-    if(!Media::validDirectoryName(name)||!QFileInfo(parent).isDir()) {emit message("目录名称无效，或父目录不存在");return;}
+    if(!Media::validDirectoryName(name)||!QFileInfo(parent).isDir()) {emit operationFinished("error","新建目录未完成","目录名称无效，或父目录不存在");return;}
     const auto p=QDir(parent).filePath(name),db=database,root=m_targetRoot;
-    if(QFileInfo::exists(p)) {emit message("同名文件或目录已存在");return;}
-    run("创建目录…",[=]{Store s(db);ensureDir(s,p);return QVariantMap{{"tree",directoryTree(root)}};},[this,parent,p](const auto &r){m_directories=r["tree"].toList();m_status="目录已创建";emit directoryCreated(parent,p);});
+    if(QFileInfo::exists(p)) {emit operationFinished("error","新建目录未完成","同名文件或目录已存在");return;}
+    run("创建目录…",[=]{Store s(db);ensureDir(s,p);return QVariantMap{{"tree",directoryTree(root)}};},[this,parent,p](const auto &r){m_directories=r["tree"].toList();m_status="目录已创建";emit directoryCreated(parent,p);},false,{},"新建目录");
 }
 QString Backend::relocatedPath(const QString &path,const QString &from,const QString &to) {return FileOps::relocatedPath(path,from,to);}
+QVariantMap Backend::directoryDeletionInfo(const QString &input) const {
+    try {
+        if(input.trimmed().isEmpty())fail("请选择要删除的目录");
+        const auto path=QFileInfo(Media::path(input)).absoluteFilePath();
+        if(m_targetRoot.isEmpty()||!insideDirectory(path,m_targetRoot)||!QFileInfo(path).isDir()||QDir(path).isRoot())
+            fail("请选择归类目录树中的普通目录，不能删除磁盘或共享根目录");
+        for(auto p=path;;p=QFileInfo(p).absolutePath()) {
+            const QFileInfo f(p);if(f.isSymLink()||f.isJunction())fail("不支持删除链接目录或链接目录内的目录");
+            if(f.absolutePath()==p)break;
+        }
+        for(const auto &protectedPath:{database,QCoreApplication::applicationDirPath(),QString(APP_PROJECT_DIR)})
+            if(insideDirectory(protectedPath,path))fail("该目录包含归图程序或应用数据，不能在应用内删除");
+        const auto identity=FileOps::directoryToken(path);
+        const bool nonEmpty=!QDir(path).isEmpty(QDir::AllEntries|QDir::Hidden|QDir::System|QDir::NoDotAndDotDot);
+        return {{"path",path},{"identity",identity},{"nonEmpty",nonEmpty}};
+    } catch(const std::exception &e) {return {{"error",QString::fromUtf8(e.what())}};}
+}
+void Backend::applyDirectoryDeletion(const QString &path) {
+    const auto parent=QFileInfo(path).absolutePath();
+    const auto removeChildren=[&](QVariantList &list) {
+        list.erase(std::remove_if(list.begin(),list.end(),[&](const QVariant &v){return insideDirectory(v.toMap()["path"].toString(),path);}),list.end());
+    };
+    removeChildren(m_items);removeChildren(m_queue);
+    m_sources.removeIf([&](const QString &source){return insideDirectory(source,path);});
+    if(m_sources.isEmpty())m_batch=0;
+    if(insideDirectory(m_targetRoot,path))m_targetRoot=parent;
+    persist();emit directoryDeleted(path,parent);
+}
+void Backend::deleteDirectory(const QString &input,const QString &identity,bool includeContents) {
+    if(m_busy||m_restarting)return;
+    if(m_pending){emit operationFinished("error","删除目录未完成","存在未完成操作，请先核对操作记录");return;}
+    const auto info=directoryDeletionInfo(input);
+    if(info.contains("error")){emit operationFinished("error","删除目录未完成",info["error"].toString());return;}
+    if(info["identity"].toString()!=identity||(info["nonEmpty"].toBool()&&!includeContents)) {
+        emit operationFinished("error","删除目录未完成","目录或目录内容已变化，请重新打开删除确认框");return;
+    }
+    const auto path=info["path"].toString(),db=database,root=m_targetRoot;
+    run("正在将目录移入回收站…",[=]{
+        Store s(db);FileOps f(s);QString error;
+        try{f.recycleDirectory(path,identity,includeContents);}catch(const std::exception &e){error=QString::fromUtf8(e.what());}
+        const auto native=QDir::toNativeSeparators(path);
+        const auto attributes=GetFileAttributesW(reinterpret_cast<LPCWSTR>(native.utf16()));
+        const auto code=attributes==INVALID_FILE_ATTRIBUTES?GetLastError():ERROR_SUCCESS;
+        const bool removed=code==ERROR_FILE_NOT_FOUND||code==ERROR_PATH_NOT_FOUND;
+        auto result=historyView(s);result["pending"]=f.reconcile().size();result["removed"]=removed;result["failure"]=error;
+        result["treeRoot"]=removed&&insideDirectory(root,path)?QFileInfo(path).absolutePath():root;
+        return result;
+    },[this,path](const auto &r){
+        if(r["removed"].toBool())applyDirectoryDeletion(path);
+        m_pending=r["pending"].toInt();m_history=r["history"].toList();m_canClearHistory=r["clearable"].toBool();
+        const auto error=r["failure"].toString();m_status=error.isEmpty()?"目录已移入回收站":error;
+        emit operationFinished(error.isEmpty()?"success":"error",error.isEmpty()?"目录已删除":"删除目录未完成",error.isEmpty()?path+"\n可从 Windows 回收站恢复":error);
+    },true,{},"删除目录",true);
+}
 void Backend::applyDirectoryRename(const QString &from,const QString &to) {
     m_items=FileOps::relocatedValue(m_items,from,to).toList();
     m_queue=FileOps::relocatedValue(m_queue,from,to).toList();
@@ -556,7 +621,7 @@ void Backend::transferAssets(const QStringList &ids,const QString &target,bool c
         return QVariantMap{{"done",done},{"errors",errors},{"pending",f.reconcile().size()}};
     },[this,copyOnly,action,total=selected.size()](const auto &r){
         const auto done=r["done"].toStringList();const auto errors=r["errors"].toStringList();
-        if(!copyOnly)removeItems(done);m_pending=r["pending"].toInt();
+        if(!copyOnly&&!done.isEmpty()){emit assetsMoved(done);removeItems(done);}m_pending=r["pending"].toInt();
         const int skipped=int(total)-int(done.size())-int(errors.size());
         m_status=QString(copyOnly?"已复制 %1 项，原文件保留":"已移动 %1 项").arg(done.size());
         if(!errors.isEmpty())m_status+=QString("；%1 项未完成").arg(errors.size());
@@ -641,6 +706,15 @@ void Backend::recover(const QString &id) {
     run("核对并继续未完成操作…",[=]{
         Store s(db);FileOps f(s);auto r=s.rows("SELECT * FROM operations WHERE id=?",{id});
         if(r.isEmpty())fail("记录不存在");auto old=r[0].toMap();QString p=f.recover(id);QStringList done;
+        if(old["kind"]=="trash_directory") {
+            const auto native=QDir::toNativeSeparators(p);
+            const auto attrs=GetFileAttributesW(reinterpret_cast<LPCWSTR>(native.utf16()));
+            const auto code=attrs==INVALID_FILE_ATTRIBUTES?GetLastError():ERROR_SUCCESS;
+            const bool removed=code==ERROR_FILE_NOT_FOUND||code==ERROR_PATH_NOT_FOUND;
+            return QVariantMap{{"deletedDirectory",removed?p:QString()},{"pending",f.reconcile().size()},
+                {"recycleMessage","已结束目录删除记录，请核对原目录和回收站；未继续删除任何内容"},
+                {"treeRoot",removed&&insideDirectory(root,p)?QFileInfo(p).absolutePath():root}};
+        }
         if(old["kind"]=="move") {
             for(const auto &a:s.rows("SELECT id FROM assets WHERE path=?",{old["source"]}))done.append(a.toMap()["id"].toString());
             s.exec("UPDATE assets SET path=? WHERE path=?",{p,old["source"]});
@@ -666,6 +740,7 @@ void Backend::recover(const QString &id) {
                            {"treeRoot",old["kind"]=="rename_directory"?FileOps::relocatedPath(root,old["source"].toString(),p):root}};
     },[this](const auto &r){
         const auto replacement=r["replacement"].toMap();
+        if(!r["deletedDirectory"].toString().isEmpty())applyDirectoryDeletion(r["deletedDirectory"].toString());
         if(!replacement.isEmpty()){
             for(auto *list:{&m_items,&m_queue})for(auto &value:*list)if(value.toMap()["path"]==replacement["path"])value=replacement;
             persist();emit cropOutputsReady(r["replacedId"].toString(),{replacement["id"].toString()},true);

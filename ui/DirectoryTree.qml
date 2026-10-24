@@ -25,6 +25,7 @@ ListView {
     signal newDirectoryRequested(string path)
     signal renameDirectoryRequested(string path,string name)
     signal directoryRevealRequested(string path)
+    signal deleteDirectoryRequested(string path)
     onRootPathChanged: {
         countChangeTimer.stop(); countChanges = ({})
         if (rootPath !== retainedRootPath) collapsedPaths = ({})
@@ -75,6 +76,12 @@ ListView {
             enabled: tree.enabled
             onTriggered: tree.directoryRevealRequested(tree.contextPath)
         }
+        UiMenuItem {
+            objectName: "deleteDirectoryMenuItem"
+            text: "删除目录"; iconName: "trash"; destructive: true
+            enabled: tree.enabled
+            onTriggered: tree.deleteDirectoryRequested(tree.contextPath)
+        }
     }
     model: {
         const result = []
@@ -91,7 +98,7 @@ ListView {
     }
     clip: true
     spacing: 2
-    ScrollBar.vertical: ScrollBar {}
+    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AlwaysOff }
     delegate: Rectangle {
         id: directoryRow
         objectName:"directoryRow"
@@ -104,6 +111,7 @@ ListView {
             GradientStop {position:1;color:Theme.mix(Theme.secondary,Qt.rgba(1,1,1,1),directoryRow.selectionTint)}
         }
         required property var modelData
+        readonly property bool directComplete:modelData.directCount===0
         readonly property int countDelta: Number(tree.countChanges[modelData.path] || 0)
         width: ListView.view.width
         height: 37
@@ -158,7 +166,24 @@ ListView {
             Glyph {name: "folder"; width: 16; height: 16; ink:directoryRow.selected?directoryRow.selectionInk:"#74868d"}
             Column {
                 Layout.fillWidth:true;Layout.minimumWidth:0;spacing:0
-                Text {width:parent.width;text:modelData.depth===0?(modelData.path.replace(/\\/g,"/").split("/").filter(p=>p).pop()||modelData.name):modelData.name;elide:Text.ElideMiddle;font.pixelSize:13;font.weight:tree.selectedPath===modelData.path?Font.DemiBold:Font.Normal;color:directoryRow.selected?directoryRow.selectionInk:"#3a4c54"}
+                Row {
+                    width:parent.width;spacing:4
+                    Text {
+                        objectName:"directoryName"
+                        width:Math.max(0,Math.min(implicitWidth,parent.width-(completeBadge.visible?completeBadge.width+parent.spacing:0)))
+                        text:modelData.depth===0?(modelData.path.replace(/\\/g,"/").split("/").filter(p=>p).pop()||modelData.name):modelData.name
+                        elide:Text.ElideMiddle;font.pixelSize:13;font.weight:tree.selectedPath===modelData.path?Font.DemiBold:Font.Normal
+                        color:directoryRow.selected?directoryRow.selectionInk:"#3a4c54"
+                    }
+                    Rectangle {
+                        id:completeBadge;objectName:"directoryCompleteBadge"
+                        property string directoryPath:modelData.path
+                        anchors.verticalCenter:parent.verticalCenter
+                        visible:directoryRow.directComplete;width:14;height:14;radius:7;color:"#a0a9ae"
+                        Accessible.role:Accessible.StaticText;Accessible.name:"直属图片和视频已处理完"
+                        Glyph {anchors.centerIn:parent;width:10;height:10;name:"check";ink:"#ffffff";strokeWidth:2.5}
+                    }
+                }
                 Text {visible:tree.workingPath===modelData.path;text:"浏览中";font.pixelSize:10;color:"#71828a"}
             }
             Rectangle {Layout.preferredWidth:Math.max(25,countLabel.implicitWidth+12);Layout.preferredHeight:21;radius:5;color:directoryRow.selected?"#b3ffffff":"#e3e8eb"
@@ -175,7 +200,7 @@ ListView {
             }
         }
         ToolTip.visible: dirMouse.containsMouse
-        ToolTip.text: modelData.path + "\n单击选择归类目标；双击查看直属图片和视频" + (tree.workingPath === modelData.path ? "\n当前浏览目录" : "") + "\n" + (modelData.mediaCount >= 0 ? "含子目录合计 " + modelData.mediaCount + " 个（图片 " + modelData.imageCount + "，视频 " + modelData.videoCount + "）" : "总数暂不可用或统计不完整，可点击刷新") + (modelData.directCount >= 0 ? "\n当前目录直属 " + modelData.directCount + " 个（图片 " + modelData.directImageCount + "，视频 " + modelData.directVideoCount + "）" : "")
+        ToolTip.text: modelData.path + "\n单击选择归类目标；双击查看直属图片和视频" + (tree.workingPath === modelData.path ? "\n当前浏览目录" : "") + "\n" + (modelData.mediaCount >= 0 ? "含子目录合计 " + modelData.mediaCount + " 个（图片 " + modelData.imageCount + "，视频 " + modelData.videoCount + "）" : "总数暂不可用或统计不完整，可点击刷新") + (directoryRow.directComplete ? "\n直属图片和视频已处理完（不含子目录）" : "") + (modelData.directCount >= 0 ? "\n当前目录直属 " + modelData.directCount + " 个（图片 " + modelData.directImageCount + "，视频 " + modelData.directVideoCount + "）" : "")
         ToolTip.delay: 700
     }
 }

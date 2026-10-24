@@ -33,6 +33,8 @@ ImageClassifier/
 | --- | --- | --- |
 | 启动与进程 | [main.cpp](src/main.cpp)、[AppRestart](src/AppRestart.h) | 数据目录、单实例锁、QML 引擎和图片提供器；重启前保存状态，通过进程握手交接数据锁 |
 | 工作区界面 | [Application.qml](ui/Application.qml) | 批量网格、选择、筛选、模式切换和弹窗协调；资产 ID 关联卡片与大图 |
+| 切回刷新 | [ActivationRefresh.qml](ui/ActivationRefresh.qml) | 监听应用级前后台状态；350 毫秒防抖，忙碌或弹窗／设置期间延后，调用工作区既有刷新流程，手动刷新合并待执行请求 |
+| 批量列表模型 | [AssetListModel.qml](ui/AssetListModel.qml) | 将筛选后的列表快照按资产 ID 差量同步为 QML ListModel，仅插入、移除、移动或更新变化项；Backend 的 `assetsMoved` 提供成功项目，工作区在列表更新前记录后继项目及视区偏移，更新后恢复锚点 |
 | 主题与配色 | [Theme.qml](ui/Theme.qml)、[ThemeSettings.qml](ui/ThemeSettings.qml)、[ThemeColorField.qml](ui/ThemeColorField.qml) | `qmldir` 注册引擎级单例，统一主题色、深浅状态和对比度；Backend 验证并持久化颜色组合。`ThemeHeader.qml` 统一工作区及设置页顶栏；渐变应用于顶栏、较大的按钮和选中背景；`ThemedIcon.qml` 通过图片提供器为原 SVG 换色 |
 | 操作反馈 | [OperationToast.qml](ui/OperationToast.qml) | 接收 Backend 的结构化操作结果，区分成功、失败和部分完成；管理提示队列、一次性图标动画、自动收起和详情入口，不从状态文案猜测结果 |
 | 功能界面 | [ImageEditor.qml](ui/ImageEditor.qml)、[DirectoryTree.qml](ui/DirectoryTree.qml)、[SettingsPage.qml](ui/SettingsPage.qml)、[SourcesDialog.qml](ui/SourcesDialog.qml) | 编辑、目录交互、设置和来源管理；基础控件使用 `Ui*.qml`，图标使用 `Glyph.qml` 和 SVG |
@@ -43,7 +45,7 @@ ImageClassifier/
 | 裁剪几何 | [CropGeometry](src/CropGeometry.h)、[RotatingPreview.qml](ui/RotatingPreview.qml) | 旋转坐标、比例及图像边界约束；预览和导出使用一致几何规则 |
 | 图片视口 | [PhotoViewport.qml](ui/PhotoViewport.qml)、[PhotoSwipeArea.qml](ui/PhotoSwipeArea.qml) | 适合窗口／铺满切换、鼠标定位缩放和拖动平移；非裁剪适合窗口时识别横向拖拽，松手发出前后导航，保护双击及缩放手势；视口坐标与裁剪参数分离 |
 | 相邻图预载 | [NeighborPreload.qml](ui/NeighborPreload.qml) | 当前大图就绪后预载前后各一张静态预览，通过 Qt 图片缓存复用解码；离开大图释放引用，滑动过渡由 `RotatingPreview.qml` 保留旧纹理并协调新旧图位置 |
-| 文件操作 | [FileOps](src/FileOps.h) | 移动、复制、子图写入、目录重命名、冲突处理、内容校验、撤销和恢复 |
+| 文件操作 | [FileOps](src/FileOps.h) | 移动、复制、子图写入、目录重命名及回收、冲突处理、内容校验、撤销和恢复；目录回收重新核对身份及非空确认，异常中断不自动续删 |
 | 存储 | [Store](src/Store.h) | SQLite 连接、建表、参数化查询及键值设置 |
 | 智能裁剪 | [SmartCrop](src/SmartCrop.h)、[worker.py](tools/ai/worker.py) | 模型进程管理、过期建议丢弃、近期样本管理、个人裁剪偏好更新 |
 | 可选模型安装 | [ModelInstaller](src/ModelInstaller.h)、[Setup-AI.ps1](Setup-AI.ps1)、[setup_models.py](tools/ai/setup_models.py) | 用户主动安装、独立后台任务、阶段状态与日志、单任务锁、模型校验和失败重试；启动与构建不下载模型 |

@@ -27,7 +27,7 @@ ApplicationWindow {
     property var pendingCropFocusIds: []
     property var directorySelectionSnapshot: ({})
     readonly property int hiddenSelectedCount: selection.filter(id=>!filtered.some(a=>a.id===id)).length
-    readonly property bool modalOpen: deleteFilesDialog.visible||backend.restarting||noticeDialog.visible||sourcesDialog.visible||historyDialog.visible||clearHistoryDialog.visible||newDirectory.visible||renameDirectoryDialog.visible||folderPicker.visible
+    readonly property bool modalOpen: deleteDirectoryDialog.visible||deleteFilesDialog.visible||backend.restarting||noticeDialog.visible||sourcesDialog.visible||historyDialog.visible||clearHistoryDialog.visible||newDirectory.visible||renameDirectoryDialog.visible||folderPicker.visible
     readonly property bool textEditing: activeFocusItem && activeFocusItem.cursorPosition !== undefined
     onFilteredChanged: {
         const cropChild=pendingCropFocusIds.find(id=>filtered.some(a=>a.id===id));
@@ -97,6 +97,12 @@ ApplicationWindow {
     function toggle(id) {focusId=id;let a=selection.slice();let i=a.indexOf(id);if(i>=0)a.splice(i,1);else a.push(id);selection=a}
     function chooseFolder(purpose) {pickerPurpose=purpose;folderPicker.open()}
     function createChildDirectory(path) {newDirectory.parentPath=path;newDirectory.open()}
+    function requestDirectoryDelete(path) {
+        if(backend.busy||modalOpen)return;
+        const info=backend.directoryDeletionInfo(path);
+        if(info.error){operationToast.show("error","无法删除目录",info.error);return;}
+        deleteDirectoryDialog.info=info;deleteDirectoryDialog.open();
+    }
     function viewDirectory(path) {
         if(backend.busy)return;
         editor.flushDraft();editor.stopPlayback();
@@ -105,23 +111,48 @@ ApplicationWindow {
     }
     function refreshWorkspace() {
         if(backend.busy)return;
-        if(backend.sources.length){editor.flushDraft();editor.stopPlayback();backend.refresh()}
+        activationRefresh.acknowledgeRefresh();
+        if(backend.sources.length){if(!editor.flushDraft())return;editor.stopPlayback();backend.refresh()}
         else backend.refreshDirectories();
+    }
+    ActivationRefresh {
+        id:activationRefresh;objectName:"activationRefresh"
+        ready:app.preferencesLoaded
+        blocked:backend.busy||app.modalOpen||app.settingsOpen
+        onRefreshRequested:app.refreshWorkspace()
     }
     Connections {
         target: backend
         function onLargeModeChanged() {if(app.preferencesLoaded)app.largeMode=backend.largeMode}
         function onMessage(text) {if(sourcesDialog.submitting)sourcesDialog.report(text,true);else app.tell(text)}
         function onOperationFinished(outcome,title,detail) {operationToast.show(outcome,title,detail)}
+        function onAssetsMoved(ids) {if(!app.largeMode)grid.anchorAfterMove(ids)}
         function onCropOutputsReady(sourceId,localIds,originalRemoved) {
             if(originalRemoved&&app.largeMode&&app.focusId===sourceId)app.pendingCropFocusIds=localIds;
         }
         function onDirectoryCountsChanged(changes) {directoryTree.showCountChanges(changes)}
-        function onDirectoryCreated(parent,path) {directoryTree.expandDirectory(parent)}
+        function onDirectoryCreated(parent,path) {
+            app.destination=path;
+            directoryTree.expandDirectory(parent);
+            // The backend publishes the refreshed tree after this signal.
+            Qt.callLater(function() {
+                directoryTree.forceLayout();
+                for(let i=0;i<directoryTree.model.length;++i) {
+                    if(directoryTree.model[i].path===path) {
+                        directoryTree.positionViewAtIndex(i,ListView.Contain);
+                        break;
+                    }
+                }
+            });
+            operationToast.show("success","目录已创建并设为目标",path);
+        }
         function onDirectoryRenamed(from,to) {
             editor.relocateTargets(from,to);
             app.destination=backend.relocatedPath(app.destination,from,to);
             directoryTree.relocateDirectories(from,to);
+        }
+        function onDirectoryDeleted(path,parent) {
+            if(backend.relocatedPath(app.destination,path,parent)!==app.destination)app.destination=parent;
         }
         function onChanged() {
             app.selection=app.selection.filter(id=>backend.items.some(a=>a.id===id));
@@ -183,8 +214,28 @@ ApplicationWindow {
         RowLayout {
             Layout.fillWidth:true;Layout.fillHeight:true;spacing:0
             Rectangle {
-                Layout.preferredWidth:220;Layout.fillHeight:true;color:"#edf0f2"
-                Rectangle {anchors.right:parent.right;width:1;height:parent.height;color:"#dce2e4"}
+                id:sidebar;objectName:"directorySidebar";z:1
+                readonly property real maximumSidebarWidth:Math.max(180,Math.min(480,app.width-900))
+                Layout.preferredWidth:Math.min(maximumSidebarWidth,sidebarResize.resizing?sidebarResize.pendingWidth:backend.sidebarWidth)
+                Layout.minimumWidth:Layout.preferredWidth;Layout.maximumWidth:Layout.preferredWidth
+                Layout.fillHeight:true;color:"#edf0f2"
+                MouseArea {
+                    id:sidebarResize;objectName:"sidebarResizeHandle";z:10
+                    anchors.right:parent.right;anchors.rightMargin:-4;anchors.top:parent.top;anchors.bottom:parent.bottom;width:8
+                    hoverEnabled:true;cursorShape:Qt.SplitHCursor;acceptedButtons:Qt.LeftButton;preventStealing:true
+                    enabled:!app.modalOpen
+                    property real pendingWidth:220
+                    property bool resizing:false
+                    property real pressX:0
+                    property real startWidth:220
+                    onPressed:mouse=>{startWidth=sidebar.width;pendingWidth=startWidth;pressX=mapToItem(null,mouse.x,mouse.y).x;resizing=true}
+                    onPositionChanged:mouse=>{if(pressed)pendingWidth=Math.max(180,Math.min(sidebar.maximumSidebarWidth,startWidth+mapToItem(null,mouse.x,mouse.y).x-pressX))}
+                    onReleased:{backend.sidebarWidth=Math.round(pendingWidth);resizing=false}
+                    onCanceled:resizing=false
+                    onWheel:wheel=>wheel.accepted=false
+                    Rectangle {anchors.centerIn:parent;width:sidebarResize.pressed?3:sidebarResize.containsMouse?2:1;height:parent.height;color:sidebarResize.pressed||sidebarResize.containsMouse?Theme.primary:"#dce2e4"}
+                    ToolTip.visible:containsMouse&&!pressed;ToolTip.text:"拖动调整目录栏宽度";ToolTip.delay:600
+                }
                 ColumnLayout {anchors.fill:parent;anchors.margins:12;spacing:7
                     RowLayout {Layout.fillWidth:true;spacing:8
                         Text {text:"归类目录";font.pixelSize:13;font.weight:Font.DemiBold;color:"#34444c";Layout.fillWidth:true}
@@ -234,6 +285,7 @@ ApplicationWindow {
                         onDirectoryOpened:path=>app.viewDirectory(path)
                         onNewDirectoryRequested:path=>app.createChildDirectory(path)
                         onRenameDirectoryRequested:(path,name)=>{renameDirectoryDialog.directoryPath=path;renameDirectoryDialog.currentName=name;renameDirectoryDialog.open()}
+                        onDeleteDirectoryRequested:path=>app.requestDirectoryDelete(path)
                         onDirectoryRevealRequested:path=>backend.reveal(path)
                     }
                 }
@@ -265,8 +317,38 @@ ApplicationWindow {
                             }
                         }
                     }
-                    GridView {id:grid;objectName:"batchGrid";Layout.fillWidth:true;Layout.fillHeight:true;clip:true;model:app.filtered
+                    GridView {id:grid;objectName:"batchGrid";Layout.fillWidth:true;Layout.fillHeight:true;clip:true
+                        model:AssetListModel {records:app.filtered}
                         cacheBuffer:Math.max(height,cellHeight*2)
+                        property var moveAnchor:null
+                        function anchorAfterMove(ids) {
+                            const removed=new Set(ids), rows=app.filtered
+                            let last=-1
+                            for(let i=0;i<rows.length;++i)if(removed.has(rows[i].id))last=i
+                            if(last<0)return // Moving only hidden selections does not move this viewport.
+                            let next=last+1
+                            if(next>=rows.length){next=last-1;while(next>=0&&removed.has(rows[next].id))--next}
+                            if(next<0)return // An exhausted batch has no surviving anchor.
+                            const tile=grid.itemAtIndex(next)
+                            const offset=tile?tile.mapToItem(grid,0,0).y:Math.floor(next/grid.columns)*grid.cellHeight+grid.originY-grid.contentY
+                            moveAnchor={id:rows[next].id,offset:Math.max(0,Math.min(Math.max(0,grid.height-grid.cellHeight),offset))}
+                            browseRevealTimer.stop();grid.pendingBrowseId=""
+                            selectionRevealTimer.stop();grid.pendingSelectionId=""
+                            moveAnchorTimer.restart()
+                        }
+                        Timer {
+                            id:moveAnchorTimer;interval:0
+                            onTriggered:{
+                                const anchor=grid.moveAnchor;grid.moveAnchor=null
+                                if(!anchor||app.largeMode||app.settingsOpen)return
+                                const index=app.filtered.findIndex(row=>row.id===anchor.id)
+                                if(index<0)return
+                                grid.cancelFlick();grid.forceLayout()
+                                grid.positionViewAtIndex(index,GridView.Beginning);grid.forceLayout()
+                                const tile=grid.itemAtIndex(index)
+                                if(tile)grid.contentY=Math.max(grid.originY,Math.min(grid.originY+Math.max(0,grid.contentHeight-grid.height),grid.contentY+tile.mapToItem(grid,0,0).y-anchor.offset))
+                            }
+                        }
                         property string pendingBrowseId:""
                         property int browseRevealAttempts:0
                         function revealBrowsedItem(id) {
@@ -347,7 +429,8 @@ ApplicationWindow {
                         }
                         delegate:PhotoCard {
                             onPlayRequested:app.playVideo(modelData.id)
-                            required property var modelData
+                            required property var recordData
+                            readonly property var modelData:recordData
                             required property int index
                             enabled:!backend.busy
                             externalHovered:batchSelection.hoveredIndex===index
@@ -464,6 +547,22 @@ ApplicationWindow {
         onOpened:{newName.clear();newName.forceActiveFocus()}
         onAccepted:backend.createDirectory(parentPath,newName.text)
     }
+    UiDialog {
+        id:deleteDirectoryDialog;objectName:"deleteDirectoryDialog";anchors.centerIn:parent;width:470;modal:true
+        property var info:({})
+        title:info.nonEmpty?"删除非空目录？":"删除目录？"
+        acceptText:"移入回收站";acceptTone:"danger";standardButtons:Dialog.Ok|Dialog.Cancel
+        ColumnLayout {width:parent.width;spacing:12
+            Label {text:deleteDirectoryDialog.info.path||"";Layout.fillWidth:true;wrapMode:Text.WrapAnywhere}
+            Label {objectName:"deleteDirectoryWarning";text:deleteDirectoryDialog.info.nonEmpty?"此目录非空，目录内的全部文件和子目录（包括隐藏文件）将一起移入 Windows 回收站。":"此空目录将移入 Windows 回收站。";color:deleteDirectoryDialog.info.nonEmpty?"#c33e3e":"#667780";Layout.fillWidth:true;wrapMode:Text.Wrap}
+            Label {text:"确认删除后，可从回收站恢复。";color:"#667780";Layout.fillWidth:true;wrapMode:Text.Wrap}
+        }
+        onAccepted:{
+            if(!editor.flushDraft())return;
+            editor.stopPlayback();editor.invalidateSuggestion();
+            backend.deleteDirectory(info.path,info.identity,info.nonEmpty);
+        }
+    }
     UiDialog {id:renameDirectoryDialog;objectName:"renameDirectoryDialog";acceptText:"重命名";anchors.centerIn:parent;width:410;modal:true;title:"重命名目录";standardButtons:Dialog.Ok|Dialog.Cancel
         property string directoryPath:""
         property string currentName:""
@@ -486,12 +585,12 @@ ApplicationWindow {
             ScrollBar.vertical:ScrollBar {}
             delegate:Rectangle {required property var modelData;width:ListView.view.width;height:105;color:"#f0f3f4";radius:5
                 ColumnLayout {anchors.fill:parent;anchors.margins:10;spacing:4
-                    Text {objectName:"historyEntrySummary";text:({move:"文件移动",copy:"文件复制",live_move:"Live 图成组移动",live_copy:"Live 图成组复制",mkdir:"创建目录",export:"保存裁剪子图",replace_image:"裁剪覆盖原图",recycle:"裁剪后回收原文件",trash:"删除文件（回收站）",rename_directory:"目录重命名"}[modelData.kind]||modelData.kind)+" · "+({planned:"等待执行",running:"执行中",copied:"已复制，等待校验",target_ready:"目标文件已保存",source_removed:"原位置文件已移除",committed:"已完成",undone:"已撤销",abandoned:"已结束"}[modelData.state]||modelData.state)+" · "+(modelData.createdLocal||modelData.created);font.pixelSize:11;color:"#3e4c53"}
+                    Text {objectName:"historyEntrySummary";text:({move:"文件移动",copy:"文件复制",live_move:"Live 图成组移动",live_copy:"Live 图成组复制",mkdir:"创建目录",export:"保存裁剪子图",replace_image:"裁剪覆盖原图",recycle:"裁剪后回收原文件",trash:"删除文件（回收站）",trash_directory:"删除目录（回收站）",rename_directory:"目录重命名"}[modelData.kind]||modelData.kind)+" · "+({planned:"等待执行",running:"执行中",copied:"已复制，等待校验",target_ready:"目标文件已保存",source_removed:"原位置文件已移除",committed:"已完成",undone:"已撤销",abandoned:"已结束"}[modelData.state]||modelData.state)+" · "+(modelData.createdLocal||modelData.created);font.pixelSize:11;color:"#3e4c53"}
                     Text {text:modelData.source+" → "+modelData.target;Layout.fillWidth:true;elide:Text.ElideMiddle;font.pixelSize:11;color:"#667780"}
                     Text {text:modelData.error;visible:!!modelData.error;Layout.fillWidth:true;elide:Text.ElideRight;font.pixelSize:11;color:"#a36044"}
-                    RowLayout {spacing:8;UiButton {text:(modelData.kind==="recycle"||modelData.kind==="trash")?"打开原目录":"打开目标目录";iconName:"folderOpen";implicitHeight:27;onClicked:backend.reveal((modelData.kind==="recycle"||modelData.kind==="trash")?modelData.source:modelData.target)}
+                    RowLayout {spacing:8;UiButton {text:["recycle","trash","trash_directory"].includes(modelData.kind)?"打开原目录":"打开目标目录";iconName:"folderOpen";implicitHeight:27;onClicked:backend.reveal(["recycle","trash","trash_directory"].includes(modelData.kind)?modelData.source:modelData.target)}
                         UiButton {text:"撤销移动";iconName:"undo";tone:"warning";hint:modelData.kind==="live_move"?"将 Live 图的照片和视频一起移回原位置":"将文件从目标目录移回原位置";implicitHeight:27;visible:(modelData.kind==="move"||modelData.kind==="live_move")&&modelData.state==="committed";enabled:!backend.busy;onClicked:{backend.undo(modelData.id);historyDialog.close()}}
-                        UiButton {text:"核对并继续";iconName:"forward";tone:"warning";hint:(modelData.kind==="recycle"||modelData.kind==="trash")?"核对尚未回收的原文件（裁剪后删除同时校验子图），再继续移入回收站":"核对文件后继续这项操作；若是移动，将在目标完整后移除原位置的文件";implicitHeight:27;visible:!["committed","undone","abandoned"].includes(modelData.state);enabled:!backend.busy;onClicked:{backend.recover(modelData.id);historyDialog.close()}}
+                        UiButton {text:modelData.kind==="trash_directory"?"核对并结束":"核对并继续";iconName:"forward";tone:"warning";hint:modelData.kind==="trash_directory"?"结束未确认的删除记录，不会继续删除目录；请核对原目录和回收站":(modelData.kind==="recycle"||modelData.kind==="trash")?"核对尚未回收的原文件（裁剪后删除同时校验子图），再继续移入回收站":"核对文件后继续这项操作；若是移动，将在目标完整后移除原位置的文件";implicitHeight:27;visible:!["committed","undone","abandoned"].includes(modelData.state);enabled:!backend.busy;onClicked:{backend.recover(modelData.id);historyDialog.close()}}
                     }
                 }
             }

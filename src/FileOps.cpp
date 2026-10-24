@@ -138,6 +138,32 @@ QString FileOps::renameDirectory(const QString &source,const QString &name) {
         return finishDirectoryRename(store.rows("SELECT * FROM operations WHERE id=?",{id})[0].toMap());
     } catch(const std::exception &e) {store.exec("UPDATE operations SET error=? WHERE id=?",{QString::fromUtf8(e.what()),id});throw;}
 }
+QString FileOps::directoryToken(const QString &path) {return directoryIdentity(path);}
+QString FileOps::recycleDirectory(const QString &source,const QString &expectedIdentity,bool includeContents) {
+    const auto path=QFileInfo(source).absoluteFilePath();
+    if(QDir(path).isRoot())fail("不能删除磁盘或共享根目录");
+    if(expectedIdentity.isEmpty()||directoryIdentity(path)!=expectedIdentity)fail("目录已变化，请重新确认删除");
+    const auto entries=QDir::AllEntries|QDir::Hidden|QDir::System|QDir::NoDotAndDotDot;
+    if(!includeContents&&!QDir(path).isEmpty(entries))fail("目录已不为空，请重新打开删除确认框");
+    const auto id=QUuid::createUuid().toString(QUuid::WithoutBraces);
+    store.exec("INSERT INTO operations(id,kind,source,target,identity,state) VALUES(?,'trash_directory',?,'回收站',?,'planned')",{id,path,expectedIdentity});
+    try {
+        if(checkpoint)checkpoint("directory_recycle_planned");
+        if(directoryIdentity(path)!=expectedIdentity)fail("目录已变化，请重新确认删除");
+        if(!includeContents&&!QDir(path).isEmpty(entries))fail("目录已不为空，请重新打开删除确认框");
+        phase(id,"running");QString trash;
+        const bool ok=trashFile?trashFile(path,&trash):QFile::moveToTrash(path,&trash);
+        if(!ok)fail("无法将目录移入回收站：目录可能被占用、无权限或所在磁盘不支持回收站");
+        if(!confirmedMissing(path))fail("目录仍在原位置，未确认删除完成，请核对回收站");
+        if(checkpoint)checkpoint("directory_recycled");
+        store.exec("UPDATE operations SET state='committed',temp=?,error='' WHERE id=?",{trash,id});
+    } catch(const std::exception &e) {
+        // A failed attempt must not automatically resume deletion on startup.
+        // If the source still exists, close the attempt so the user can confirm anew.
+        store.exec("UPDATE operations SET state=?,error=? WHERE id=?",{QFileInfo(path).isDir()?"abandoned":"running",QString::fromUtf8(e.what()),id});throw;
+    }
+    return id;
+}
 QString FileOps::hash(const QString &path) {
     QFile f(path); if(!f.open(QIODevice::ReadOnly)) fail("读取失败："+path);
     QCryptographicHash h(QCryptographicHash::Sha256);
@@ -470,7 +496,7 @@ QVariantList FileOps::reconcile() {
             if(!members.isEmpty()&&std::all_of(members.begin(),members.end(),[](const QVariant &m){return m.toMap()["state"]=="recycled";}))phase(r["id"].toString(),"committed");
             continue; // Startup never resumes deletion automatically.
         }
-        if(r["kind"]=="replace_image"||r["kind"]=="rename_directory"||r["kind"]=="live_move"||r["kind"]=="live_copy")continue;
+        if(r["kind"]=="trash_directory"||r["kind"]=="replace_image"||r["kind"]=="rename_directory"||r["kind"]=="live_move"||r["kind"]=="live_copy")continue;
         // An untouched top-level transfer need not block every later action.
         // Require positive evidence: no destination or temp, original identity,
         // version and bytes intact. Partial transfers and Live groups stay pending.
@@ -521,6 +547,10 @@ QString FileOps::recover(const QString &id) {
     auto r=rows[0].toMap();const auto source=r["source"].toString(),target=r["target"].toString(),temp=r["temp"].toString(),sha=r["sha"].toString();
     if(r["state"]=="committed")return target;
     if(r["state"]=="undone"||r["state"]=="abandoned")fail("此记录已结束");
+    if(r["kind"]=="trash_directory") {
+        store.exec("UPDATE operations SET state='abandoned',error=? WHERE id=?",{"已结束未确认的目录删除；请核对原目录和回收站，需要删除时重新确认",id});
+        return source;
+    }
     if(r["kind"]=="recycle"||r["kind"]=="trash")return finishRecycle(id,true);
     if(r["kind"]=="rename_directory")return finishDirectoryRename(r);
     if(r["kind"]=="live_move"||r["kind"]=="live_copy")return finishLive(id);

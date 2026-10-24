@@ -17,6 +17,8 @@ public:
     static QString uniquePath(const QString &directory, const QString &name);
     static QString relocatedPath(const QString &path,const QString &from,const QString &to);
     static QVariant relocatedValue(const QVariant &value,const QString &from,const QString &to);
+    static QString directoryToken(const QString &path);
+    QString recycleDirectory(const QString &path,const QString &expectedIdentity,bool includeContents);
     QString renameDirectory(const QString &source,const QString &name);
     QString move(const QString &source, const QString &directory, qint64 expectedSize=-1, qint64 expectedMtime=-1, const QString &parent={}, const QString &exactName={}, const QString &expectedSha={});
     QString copy(const QString &source, const QString &directory, qint64 expectedSize=-1, qint64 expectedMtime=-1, const QString &parent={}, const QString &exactName={}, const QString &expectedSha={});

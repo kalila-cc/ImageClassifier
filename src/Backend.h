@@ -30,6 +30,7 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantMap theme READ theme WRITE setTheme NOTIFY themeChanged)
     Q_PROPERTY(bool cropMode READ cropMode WRITE setCropMode NOTIFY preferencesChanged)
     Q_PROPERTY(int thumbnailSize READ thumbnailSize WRITE setThumbnailSize NOTIFY preferencesChanged)
+    Q_PROPERTY(int sidebarWidth READ sidebarWidth WRITE setSidebarWidth NOTIFY preferencesChanged)
     Q_PROPERTY(bool showFilmstrip READ showFilmstrip WRITE setShowFilmstrip NOTIFY preferencesChanged)
     Q_PROPERTY(bool defaultRecursive READ defaultRecursive WRITE setDefaultRecursive NOTIFY preferencesChanged)
     Q_PROPERTY(QString dataDirectory READ dataDirectory CONSTANT)
@@ -65,6 +66,8 @@ public:
     bool cropMode() const {return m_cropMode;}
     void setCropMode(bool enabled);
     int thumbnailSize() const {return m_thumbnailSize;}
+    int sidebarWidth() const {return m_sidebarWidth;}
+    void setSidebarWidth(int width);
     bool showFilmstrip() const {return m_showFilmstrip;}
     bool defaultRecursive() const {return m_defaultRecursive;}
     QString dataDirectory() const;
@@ -81,6 +84,8 @@ public:
     Q_INVOKABLE void setTargetRoot(const QString &path);
     Q_INVOKABLE void refreshDirectories();
     Q_INVOKABLE void createDirectory(const QString &parent,const QString &name);
+    Q_INVOKABLE QVariantMap directoryDeletionInfo(const QString &path) const;
+    Q_INVOKABLE void deleteDirectory(const QString &path,const QString &identity,bool includeContents);
     Q_INVOKABLE void renameDirectory(const QString &path,const QString &name);
     Q_INVOKABLE QString relocatedPath(const QString &path,const QString &from,const QString &to);
     Q_INVOKABLE void nextBatch(int count=0,bool notify=false);
@@ -110,9 +115,11 @@ signals:
     void changed();
     void message(const QString &text);
     void operationFinished(const QString &outcome,const QString &title,const QString &detail);
+    void assetsMoved(const QStringList &ids);
     void directoryCountsChanged(const QVariantMap &changes);
     void directoryRenamed(const QString &from,const QString &to);
     void directoryCreated(const QString &parent,const QString &path);
+    void directoryDeleted(const QString &path,const QString &parent);
     void sourcesApplied(bool success,const QString &error);
     void cropOutputsReady(const QString &sourceId,const QStringList &localIds,bool originalRemoved);
 private:
@@ -128,6 +135,7 @@ private:
     bool m_cancelRequested=false;
     QVariantMap m_theme{{"primary","#a8dfcf"},{"secondary","#afd5f0"},{"mode","single"}};
     int m_thumbnailSize=240;
+    int m_sidebarWidth=220;
     bool m_showFilmstrip=true,m_defaultRecursive=true,m_cropMode=true;
     bool savePreference(const QString &key,const QString &value);
     std::shared_ptr<std::atomic_bool> stop;
@@ -149,5 +157,6 @@ private:
     void removeItems(const QStringList &ids);
     void transferAssets(const QStringList &ids,const QString &target,bool copyOnly);
     void applyDirectoryRename(const QString &from,const QString &to);
+    void applyDirectoryDeletion(const QString &path);
     QVariantMap asset(const QString &id) const;
 };
