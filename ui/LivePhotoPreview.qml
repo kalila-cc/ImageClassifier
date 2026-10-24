@@ -71,7 +71,7 @@ Item {
             hint: live.muted ? "开启实况声音" : "静音"; Accessible.name: hint
             background: Rectangle {
                 radius: 8
-                color: soundButton.down ? "#c9ded9" : soundButton.pointerHovered ? "#f5faf8" : "#d9f5f7f6"
+                color: soundButton.down ? Theme.softPressed : soundButton.pointerHovered ? "#f5faf8" : "#d9f5f7f6"
                 border.width: 1; border.color: "#55ffffff"
             }
             onClicked: if (playback.item) playback.item.muted=!playback.item.muted
@@ -95,8 +95,8 @@ Item {
             }
             background: Rectangle {
                 radius: 8
-                color: playButton.down ? "#cce0eee8" : live.playing ? (playButton.pointerHovered ? "#cce2f1ea" : "#b3e8f3ee") : playButton.pointerHovered ? "#ccf5faf8" : "#99f5f7f6"
-                border.width: 1; border.color: live.playing ? "#6698b7ab" : "#33ffffff"
+                color: playButton.down ? Theme.alpha(Theme.soft,.8) : live.playing ? (playButton.pointerHovered ? Theme.alpha(Theme.softHover,.8) : Theme.alpha(Theme.soft,.7)) : playButton.pointerHovered ? "#ccf5faf8" : "#99f5f7f6"
+                border.width: 1; border.color: live.playing ? Theme.alpha(Theme.focus,.4) : "#33ffffff"
             }
             onClicked: {if(live.playing)live.stop();else {live.beforePlay();backend.playLive(live.asset.id,live.ownerKey)}}
         }

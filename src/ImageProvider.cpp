@@ -12,6 +12,10 @@
 #include <QUrl>
 #include <QMutexLocker>
 #include <QThread>
+#include <QFile>
+#include <QBuffer>
+#include <QImageReader>
+#include <QRegularExpression>
 #include <cmath>
 ImageProvider::ImageProvider(QString db):QQuickImageProvider(QQuickImageProvider::Image,QQmlImageProviderBase::ForceAsynchronousImageLoading),database(std::move(db)),
     thumbnails(QFileInfo(database).absoluteDir().filePath("cache/thumbnails-v1")){}
@@ -55,6 +59,22 @@ QImage ImageProvider::videoThumbnail(const QString &path,int edge) {
 QImage ImageProvider::requestImage(const QString &id,QSize *size,const QSize &requested) {
     const auto parts=id.split('/');
     try {
+        // Recolor the existing SVG assets without GPU effects. This also works
+        // with software rendering and keeps a single source for each icon.
+        if(parts.value(0)=="icon") {
+            static const QStringList icons={"crop-free","crop-1-1","crop-4-3","crop-3-4","crop-16-9","rotate-left","rotate-right"};
+            if(!icons.contains(parts.value(1))||!QRegularExpression("^[0-9a-fA-F]{6}$").match(parts.value(2)).hasMatch())throw std::runtime_error("Invalid icon");
+#ifdef APP_UI_DIR
+            const QString root=QString(APP_UI_DIR);
+#else
+            const QString root=QString(TEST_UI_DIR)+"/../ui";
+#endif
+            QFile file(root+"/icons/"+parts[1]+".svg");if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("Icon missing");
+            auto svg=file.readAll().replace("#16756a",("#"+parts[2]).toUtf8());
+            QBuffer buffer(&svg);buffer.open(QIODevice::ReadOnly);QImageReader reader(&buffer,"svg");
+            const int edge=qBound(16,qMax(requested.width(),requested.height()),128);reader.setScaledSize(QSize(edge,edge));
+            auto image=reader.read();if(size)*size=image.size();return image;
+        }
         Store s(database);const auto rows=s.rows("SELECT path,type FROM assets WHERE id=?",{parts.value(0)});
         if(rows.isEmpty())throw std::runtime_error("文件未找到");
         const auto a=rows[0].toMap();

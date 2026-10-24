@@ -27,15 +27,16 @@ Rectangle {
 
     ColumnLayout {
         anchors.fill: parent; spacing: 0
-        Rectangle {
-            Layout.fillWidth: true; Layout.preferredHeight: 60; color: "#202629"
+        ThemeHeader {
+            objectName:"settingsHeader"
+            Layout.fillWidth: true; Layout.preferredHeight: 60
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 24; anchors.rightMargin: 32; spacing: 20
-                UiButton {objectName:"settingsBack";text:"返回整理";iconName:"back";dark:true;quiet:true;implicitWidth:116;onClicked:page.backRequested()}
-                Rectangle {width: 1; height: 22; color: "#dce2e4"}
-                Text {text: "设置"; font.pixelSize: 18; font.weight: Font.DemiBold; color: "#f4f7f7"}
+                UiButton {objectName:"settingsBack";text:"返回整理";iconName:"back";onAccent:true;quiet:true;implicitWidth:116;onClicked:page.backRequested()}
+                Rectangle {width: 1; height: 22; color: Theme.alpha(Theme.surfaceInk,.25)}
+                Text {text: "设置"; font.pixelSize: 18; font.weight: Font.DemiBold; color: Theme.surfaceInk}
                 Item {Layout.fillWidth: true}
-                Text {text: "更改自动保存"; font.pixelSize: 12; color: "#a5b2b7"}
+                Text {text: "更改自动保存"; font.pixelSize: 12; color: Theme.surfaceInk}
             }
         }
         Rectangle {Layout.fillWidth: true; height: 1; color: "#dce2e4"}
@@ -47,7 +48,7 @@ Rectangle {
                     anchors.fill: parent; anchors.margins: 20; spacing: 8
                     Text {text: "偏好设置"; font.pixelSize: 11; color: "#71828a"; Layout.topMargin: 12; Layout.bottomMargin: 12; Layout.leftMargin: 12}
                     Repeater {
-                        model: ["浏览与批次", "裁剪与智能", "本地数据"]
+                        model: ["浏览与批次", "裁剪与智能", "本地数据", "主题配色"]
                         UiButton {
                             id: navButton
                             required property string modelData
@@ -56,7 +57,7 @@ Rectangle {
                             Layout.fillWidth: true; implicitHeight: 44
                             text: modelData; chosen: page.section===index; quiet: true
                             onClicked: page.section=index
-                            contentItem: Text {text: navButton.text; leftPadding: 14; verticalAlignment: Text.AlignVCenter; font.pixelSize: 13; font.weight: navButton.chosen?Font.DemiBold:Font.Normal; color: navButton.chosen?"#16756a":"#5e7079"}
+                            contentItem: Text {text: navButton.text; leftPadding: 14; verticalAlignment: Text.AlignVCenter; font.pixelSize: 13; font.weight: navButton.chosen?Font.DemiBold:Font.Normal; color: navButton.chosen?Theme.primary:"#5e7079"}
                         }
                     }
                     Item {Layout.fillHeight: true}
@@ -86,13 +87,13 @@ Rectangle {
                         Divider {}
                         RowLayout {
                             Layout.fillWidth: true; spacing: 28
-                            SettingLabel {title: "批量缩略图大小"; description: "缩小可同时查看更多图片，也可在工作区快速调整。"}
+                            SettingLabel {title: "批量缩略图大小"; description: "放大查看细节，缩小查看更多；窗口变大时图片同步放大。"}
                             ColumnLayout {spacing: 6; Layout.preferredWidth: 220; Layout.maximumWidth: 220; Layout.minimumWidth: 220
-                                UiSlider {objectName: "settingsThumbnailSize"; Layout.fillWidth: true; from: 170; to: 310; stepSize: 35; value: backend.thumbnailSize; onMoved: backend.thumbnailSize=value; Accessible.name: "批量缩略图大小"}
+                                UiSlider {objectName: "settingsThumbnailSize"; Layout.fillWidth: true; from: 170; to: 730; stepSize: 35; value: backend.thumbnailSize; onMoved: backend.thumbnailSize=value; Accessible.name: "批量缩略图大小"}
                                 RowLayout {Layout.fillWidth: true
-                                    Text {text: "紧凑"; font.pixelSize: 11; color: "#71828a"}
+                                    Text {text: "小图"; font.pixelSize: 11; color: "#71828a"}
                                     Item {Layout.fillWidth: true}
-                                    Text {text: "宽松"; font.pixelSize: 11; color: "#71828a"}
+                                    Text {text: "大图"; font.pixelSize: 11; color: "#71828a"}
                                 }
                             }
                         }
@@ -160,10 +161,11 @@ Rectangle {
                         TextEdit {objectName: "settingsDataPath"; Layout.fillWidth: true; text: backend.dataDirectory; readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap; font.pixelSize: 13; color: "#3a505b"}
                         UiButton {text: "打开数据目录"; iconName: "folderOpen"; onClicked: backend.reveal(backend.dataDirectory)}
                         Divider {}
-                        SettingLabel {title: "原图与子图"; description: "移动原文件会校验内容一致；复制会保留来源。仅裁剪将子图先存入原图目录，裁剪并归类直接保存到各目标目录。裁剪保留原图，不自动归档或删除。"}
+                        SettingLabel {title: "原图与子图"; description: "移动原文件会校验内容一致；复制会保留来源。裁剪结果统一保存在原目录。仅裁剪保留原图；单子图可覆盖原图，多子图可全部保存并校验后回收原图。Live 图裁剪为普通静态图，配套视频一并回收。"}
                         Divider {}
                         SettingLabel {title: "配置保存"; description: "更改会自动保存，无需点击保存按钮。设置页与工作区共用同一份配置，返回整理会保留当前图片、选择和裁剪草稿。"}
                     }
+                    ThemeSettings {Layout.fillWidth:true;visible:page.section===3}
                     Item {Layout.preferredHeight: 40}
                 }
             }

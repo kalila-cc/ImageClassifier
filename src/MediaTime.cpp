@@ -2,6 +2,7 @@
 #include <QDateTime>
 #include <QCollator>
 #include <QFile>
+#include <QImageReader>
 #include <QDir>
 #include <QtEndian>
 #include <windows.h>
@@ -47,6 +48,15 @@ QVariantMap Media::captureTime(const QString &path) {
     const QFileInfo file(path);
     if(file.suffix().compare("png",Qt::CaseInsensitive)==0){
         const auto inherited=inheritedTime(path);if(!inherited.isEmpty())return inherited;
+    }
+    if(QStringList{"jpg","jpeg"}.contains(file.suffix().toLower())){
+        QImageReader reader(path);
+        const auto date=QDateTime::fromString(reader.text(timeKey),Qt::ISODateWithMs);
+        if(date.isValid()){
+            auto source=reader.text(sourceKey);
+            if(source!="photo"&&source!="media"&&source!="modified")source="photo";
+            return {{"captureTime",date.toMSecsSinceEpoch()},{"timeSource",source}};
+        }
     }
     const bool video=QStringList{"mp4","mov"}.contains(file.suffix().toLower());
     ComScope com;IPropertyStore *properties=nullptr;

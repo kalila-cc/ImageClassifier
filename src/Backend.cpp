@@ -1,4 +1,5 @@
 #include "Backend.h"
+#include <QRegularExpression>
 #include "LivePhoto.h"
 #include "Store.h"
 #include "FileOps.h"
@@ -18,6 +19,7 @@
 #include <QDateTime>
 #include <QCryptographicHash>
 #include <QCollator>
+#include <QImageWriter>
 #include <windows.h>
 #include <algorithm>
 #include <stdexcept>
@@ -36,9 +38,17 @@ const QString historyProtection=QStringLiteral(
 const QString topLevelHistory=QStringLiteral(
     "NOT(o.kind IN ('move','copy') AND o.parent IN (SELECT id FROM operations WHERE kind IN ('live_move','live_copy')))");
 QVariantMap historyView(Store &s) {
-    const auto rows=s.rows(historyProtection+"SELECT o.* FROM operations o WHERE "+topLevelHistory+
+    auto rows=s.rows(historyProtection+"SELECT o.* FROM operations o WHERE "+topLevelHistory+
         " AND (o.id NOT IN (SELECT operation FROM cleared_history) OR o.id IN (SELECT id FROM protected)) "
         "ORDER BY (o.id IN (SELECT id FROM protected)) DESC,o.created DESC,o.rowid DESC LIMIT 100");
+    // SQLite CURRENT_TIMESTAMP is UTC; keep the stored value unchanged and
+    // expose local wall time separately so midnight/day boundaries are correct.
+    for(auto &value:rows) {
+        auto row=value.toMap();const auto raw=row["created"].toString();
+        const auto utc=QDateTime::fromString(QString(raw).replace(' ','T')+"Z",Qt::ISODate);
+        row["createdLocal"]=utc.isValid()?utc.toLocalTime().toString("yyyy-MM-dd HH:mm:ss"):raw;
+        value=row;
+    }
     const bool clearable=!s.rows(historyProtection+"SELECT o.id FROM operations o WHERE "+topLevelHistory+
         " AND o.id NOT IN (SELECT id FROM protected) AND o.id NOT IN (SELECT operation FROM cleared_history) LIMIT 1").isEmpty();
     return {{"history",rows},{"clearable",clearable}};
@@ -94,37 +104,13 @@ Backend::Backend(const QString &db,QObject *parent):QObject(parent),database(db)
     m_sources=parse(s.value("sources","[]")).toStringList();
     m_targetRoot=s.value("target");
     m_directories=directoryTree(m_targetRoot,false);
-    QTimer::singleShot(0,this,[this]{
-        if(m_busy)return;
-        bool missingTime=false;
-        for(const auto &item:m_items+m_queue)if(!item.toMap().contains("captureTime")||!item.toMap().contains("isLive")||item.toMap().value("liveSchema").toInt()!=2){missingTime=true;break;}
-        if(missingTime){
-            const auto items=m_items,queue=m_queue;const auto db=database;const auto cancellation=stop;
-            run("正在读取媒体信息…",[items,queue,db,cancellation]{
-                auto update=[](QVariantList list){
-                    for(auto &value:list){auto item=value.toMap();
-                        if(!item.contains("captureTime")){
-                            const auto time=Media::captureTime(item["path"].toString());
-                            for(auto it=time.begin();it!=time.end();++it)item.insert(it.key(),it.value());
-                        }
-                        if(!item.contains("isLive")||item.value("liveSchema").toInt()!=2)LivePhoto::annotate(item);
-                        value=item;
-                    }
-                    Media::sortByCaptureTime(list);return list;
-                };
-                Store store(db);QSet<QString> active;for(const auto &v:items)active.insert(v.toMap()["id"].toString());
-                auto combined=update(items+queue);
-                for(const auto &v:items+queue){const auto a=v.toMap();if(a.contains("liveVideo")){auto video=a["liveVideo"].toMap();const QFileInfo f(video["path"].toString());if(!f.isFile())continue;video["type"]="视频";video["root"]=a["root"];video["name"]=f.fileName();combined.append(video);}}
-                const auto all=LivePhoto::pairAssets(store,combined,cancellation);QVariantList current,pending;
-                for(const auto &v:all){const auto a=v.toMap();if(active.contains(a["id"].toString())||active.contains(a["liveVideo"].toMap()["id"].toString()))current.append(a);else pending.append(a);}
-                return QVariantMap{{"items",current},{"queue",pending}};
-            },[this](const auto &result){m_items=result["items"].toList();m_queue=result["queue"].toList();persist();m_status="已按拍摄时间从新到旧排列";},true);
-        }else if(!m_targetRoot.isEmpty())refreshDirectories();
-    });
     m_recursive=s.value("recursive","1")=="1";
     m_largeMode=s.value("viewMode","batch")=="large";
+    const auto savedTheme=parse(s.value("theme","{}")).toMap();
+    const QRegularExpression themeColor("^#[0-9a-fA-F]{6}$");
+    if(themeColor.match(savedTheme.value("primary").toString()).hasMatch()&&themeColor.match(savedTheme.value("secondary").toString()).hasMatch()&&QStringList{"single","gradient"}.contains(savedTheme.value("mode").toString()))m_theme=savedTheme;
     m_cropMode=s.value("cropMode","1")=="1";
-    m_thumbnailSize=qBound(170,s.value("thumbnailSize","240").toInt(),310);
+    m_thumbnailSize=qBound(170,s.value("thumbnailSize","240").toInt(),730);
     m_showFilmstrip=s.value("showFilmstrip","1")=="1";
     m_defaultRecursive=s.value("defaultRecursive","1")=="1";
     m_batchSize=qBound(10,s.value("batchSize","100").toInt(),500);
@@ -179,6 +165,10 @@ Backend::Backend(const QString &db,QObject *parent):QObject(parent),database(db)
     if(!m_items.isEmpty() || !m_queue.isEmpty()) m_status="已恢复浏览；执行操作前会重新核对文件";
     if(restoredCount)m_status=QString("已恢复 %1 张被隐藏的图片，原文件与编辑草稿均保留").arg(restoredCount);
     if(m_pending) m_status=QString("有 %1 项未完成文件操作，请先在记录中核对").arg(m_pending);
+    // The snapshot is immediately available for layout, but disk contents are
+    // authoritative. Mark startup busy before returning so edits cannot race it.
+    if(!m_sources.isEmpty())scan(false);
+    else QTimer::singleShot(0,this,[this]{if(!m_busy&&!m_targetRoot.isEmpty())refreshDirectories();});
 }
 Backend::~Backend() {stop->store(true); watcher.waitForFinished();}
 QObject *Backend::smartCrop() const {return m_smartCrop;}
@@ -189,12 +179,12 @@ void Backend::playLive(const QString &id,const QString &owner) {
 void Backend::suggestCrop(const QString &id,const QVariantMap &dimensions,const QVariantMap &spec,const QString &token) {
     if(!m_busy)m_smartCrop->request(asset(id),dimensions,spec,token);
 }
-void Backend::run(const QString &title,std::function<QVariantMap()> job,std::function<void(const QVariantMap &)> done,bool refreshTree,const QString &cancellationLabel) {
+void Backend::run(const QString &title,std::function<QVariantMap()> job,std::function<void(const QVariantMap &)> done,bool refreshTree,const QString &cancellationLabel,const QString &resultLabel,bool reportDirectoryChanges) {
     if(m_busy||m_restarting) {emit message(m_restarting?"应用正在重启，请稍候。":"请等待当前任务完成");return;}
     m_livePhoto->stop();
     m_busy=true; stop->store(false); m_cancelAction=cancellationLabel;m_cancelRequested=false;m_status=title;emit changed();
     disconnect(&watcher,nullptr,this,nullptr);
-    connect(&watcher,&QFutureWatcher<QVariantMap>::finished,this,[this,done] {
+    connect(&watcher,&QFutureWatcher<QVariantMap>::finished,this,[this,done,resultLabel,reportDirectoryChanges] {
         const auto result=watcher.result();m_busy=false;
         QString taskError;
         // Clear the completed task before done(), which may start the next batch.
@@ -204,9 +194,10 @@ void Backend::run(const QString &title,std::function<QVariantMap()> job,std::fun
             m_status=result["error"].toString();
             try {Store s(database);m_pending=s.rows("SELECT id FROM operations WHERE state NOT IN ('committed','undone','abandoned')").size();}catch(...){}
             taskError=m_status;
-            if(!m_sourceRequest.active)emit message(m_status);
+            if(!m_sourceRequest.active&&resultLabel.isEmpty())emit message(m_status);
         }
-        else {try {done(result);} catch(const std::exception &e) {m_status=QString::fromUtf8(e.what());taskError=m_status;if(!m_sourceRequest.active)emit message(m_status);}}
+        else {try {done(result);} catch(const std::exception &e) {m_status=QString::fromUtf8(e.what());taskError=m_status;if(!m_sourceRequest.active&&resultLabel.isEmpty())emit message(m_status);}}
+        if(!taskError.isEmpty()&&!resultLabel.isEmpty())emit operationFinished("error",resultLabel+"未完成",taskError);
         bool sourceFinished=false;
         if(m_sourceRequest.active) {
             if(taskError.isEmpty()&&result.value("cancelled").toBool())taskError="扫描已取消，来源目录和当前批次保持原状";
@@ -215,13 +206,28 @@ void Backend::run(const QString &title,std::function<QVariantMap()> job,std::fun
             if(!m_busy){finishSourceRequest(m_sourceRequest.error);sourceFinished=true;}
         }
         if(!sourceFinished)emit changed();
+        if(reportDirectoryChanges)emit directoryCountsChanged(result.value("directoryChanges").toMap());
     });
     const auto targetRoot=m_targetRoot;
-    watcher.setFuture(QtConcurrent::run([job,refreshTree,targetRoot] {
+    watcher.setFuture(QtConcurrent::run([job,refreshTree,targetRoot,reportDirectoryChanges] {
+        // Take the baseline on the worker just before the operation, so external additions
+        // since the last refresh are not mistaken for this operation's output.
+        const auto before=reportDirectoryChanges?directoryTree(targetRoot):QVariantList{};
         QVariantMap result;
         try {result=job();} catch(const std::exception &e) {result={{"error",QString::fromUtf8(e.what())}};}
         // Recount after partial failures too: some output files may already exist.
         if(refreshTree)result["tree"]=directoryTree(result.value("treeRoot",targetRoot).toString());
+        if(reportDirectoryChanges){
+            QHash<QString,int> counts;QVariantMap changes;
+            for(const auto &value:before){const auto row=value.toMap();const int count=row.value("mediaCount",-1).toInt();
+                if(count>=0)counts.insert(row["path"].toString().toCaseFolded(),count);
+            }
+            for(const auto &value:result.value("tree").toList()){
+                const auto row=value.toMap();const auto path=row["path"].toString(),key=path.toCaseFolded();const int count=row.value("mediaCount",-1).toInt();
+                if(count>=0&&counts.contains(key)&&count!=counts[key])changes.insert(path,count-counts[key]);
+            }
+            result["directoryChanges"]=changes;
+        }
         return result;
     }));
 }
@@ -243,8 +249,16 @@ bool Backend::savePreference(const QString &key,const QString &value) {
     try {Store store(database);store.setValue(key,value);return true;}
     catch(const std::exception &e){emit message("设置保存失败："+QString::fromUtf8(e.what()));return false;}
 }
+void Backend::setTheme(const QVariantMap &theme) {
+    const QRegularExpression hex("^#[0-9a-fA-F]{6}$");
+    const auto primary=theme.value("primary").toString().toLower(),secondary=theme.value("secondary").toString().toLower(),mode=theme.value("mode").toString();
+    if(!hex.match(primary).hasMatch()||!hex.match(secondary).hasMatch()||!QStringList{"single","gradient"}.contains(mode)) {emit message("请输入有效的六位颜色值，例如 #16756A");return;}
+    const QVariantMap next{{"primary",primary},{"secondary",secondary},{"mode",mode}};
+    if(next==m_theme||!savePreference("theme",json(next)))return;
+    m_theme=next;emit themeChanged();
+}
 void Backend::setThumbnailSize(int size) {
-    size=qBound(170,size,310);
+    size=qBound(170,size,730);
     if(size==m_thumbnailSize||!savePreference("thumbnailSize",QString::number(size)))return;
     m_thumbnailSize=size;emit preferencesChanged();
 }
@@ -366,7 +380,23 @@ void Backend::scan(bool reset,const QStringList &requestedRoots,bool requestedRe
     const auto roots=requestedRoots.isEmpty()?m_sources:requestedRoots;
     if(roots.isEmpty()) return;
     const auto recursive=requestedRoots.isEmpty()?m_recursive:requestedRecursive;const auto db=database;const auto cancellation=stop;
-    run("正在查找图片和视频…",[=] {Store s(db);auto all=Media::scan(s,roots,recursive,cancellation);return QVariantMap{{"all",all},{"cancelled",cancellation->load()}};},[this,reset,roots,recursive](const auto &r) {
+    const auto previouslyConsumed=consumed;
+    run("正在查找图片和视频…",[=] {
+        Store s(db);const auto all=Media::scan(s,roots,recursive,cancellation);QStringList restoredIds,restoredConsumed;
+        if(!reset&&!cancellation->load()&&!previouslyConsumed.isEmpty()) {
+            // A recovered original is eligible again. Do not clear consumed for
+            // files moved into a child directory that is still in recursive scope.
+            const auto key=[](const QString &p){return QDir::cleanPath(QDir::fromNativeSeparators(p)).toCaseFolded();};
+            QHash<QString,QStringList> recycled;
+            for(const auto &v:s.rows("SELECT source,parent FROM operations WHERE kind IN ('recycle','trash') AND state IN ('committed','abandoned')")) {
+                const auto op=v.toMap();if(previouslyConsumed.contains(op["parent"].toString()))recycled[key(op["source"].toString())].append(op["parent"].toString());
+            }
+            for(const auto &v:all){const auto a=v.toMap();const auto match=recycled.value(key(a["path"].toString()));
+                if(!match.isEmpty()){restoredIds.append(a["id"].toString());restoredConsumed.append(match);}
+            }
+        }
+        return QVariantMap{{"all",all},{"cancelled",cancellation->load()},{"restoredIds",restoredIds},{"restoredConsumed",restoredConsumed}};
+    },[this,reset,roots,recursive](const auto &r) {
         if(r["cancelled"].toBool()) {m_status="扫描已取消，当前批次保持原状";return;}
         m_sources=roots;m_recursive=recursive;
         int missing=0;
@@ -394,10 +424,29 @@ void Backend::scan(bool reset,const QStringList &requestedRoots,bool requestedRe
             }
             m_items=refreshed;Media::sortByCaptureTime(m_items);
         }
-        QSet<QString> active; for(const auto &a:m_items) active.insert(a.toMap()["id"].toString());
-        m_queue.clear();for(const auto &v:r["all"].toList()) {auto id=v.toMap()["id"].toString();if(!consumed.contains(id)&&!active.contains(id)) m_queue.append(v);}
+        for(const auto &id:r["restoredConsumed"].toStringList())consumed.remove(id);
+        QSet<QString> active;for(const auto &a:m_items)active.insert(a.toMap()["id"].toString());
+        const auto restored=r["restoredIds"].toStringList();int restoredVisible=0;
+        for(const auto &v:r["all"].toList()){const auto id=v.toMap()["id"].toString();
+            if(restored.contains(id)&&!active.contains(id)&&m_items.size()<m_batchSize*2){m_items.append(v);active.insert(id);++restoredVisible;}
+        }
+        Media::sortByCaptureTime(m_items);
+        const auto previousQueue=m_queue;m_queue.clear();QSet<QString> scanned;
+        for(const auto &v:r["all"].toList()) {const auto a=v.toMap();const auto id=a["id"].toString();scanned.insert(id);
+            if(a.contains("liveVideo"))scanned.insert(a["liveVideo"].toMap()["id"].toString());
+            if(!consumed.contains(id)&&!active.contains(id))m_queue.append(v);
+        }
+        if(!reset)for(const auto &v:previousQueue){const auto a=v.toMap();const auto id=a["id"].toString();
+            if(scanned.contains(id)||active.contains(id)||consumed.contains(id))continue;
+            const auto native=QDir::toNativeSeparators(a["path"].toString());
+            const auto attributes=GetFileAttributesW(reinterpret_cast<LPCWSTR>(native.utf16()));
+            const auto error=attributes==INVALID_FILE_ATTRIBUTES?GetLastError():ERROR_SUCCESS;
+            if(error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND)m_queue.append(v);
+        }
+        Media::sortByCaptureTime(m_queue);
         m_status=QString("扫描完成，共找到 %1 项图片和视频").arg(r["all"].toList().size());
         if(missing)m_status+=QString("；%1 项已不在原位置，已更新列表").arg(missing);
+        if(!restored.isEmpty())m_status+=QString("；%1 项原文件已恢复，%2 项已重新显示").arg(restored.size()).arg(restoredVisible);
         if(!m_queue.isEmpty()&&m_batch>0)m_status+=QString("；后续还有 %1 项待加载").arg(m_queue.size());
         persist();
         // Refresh preserves the current batch even if all its files disappeared externally.
@@ -441,7 +490,7 @@ void Backend::renameDirectory(const QString &input,const QString &name) {
         [this,path](const auto &r){applyDirectoryRename(path,r["path"].toString());m_status="目录已重命名";},true);
 }
 void Backend::setBatchSize(int count) {if(m_busy)return;m_batchSize=qBound(10,count,500);persist();emit changed();}
-void Backend::nextBatch(int count) {
+void Backend::nextBatch(int count,bool notify) {
     if(m_busy)return;
     if(!m_items.isEmpty()) {emit message("请先完成当前批文件的移动归类；仅裁剪和复制会保留当前文件");return;}
     count=count>0?qBound(10,count,500):m_batchSize;const auto queue=m_queue;const auto cancellation=stop;
@@ -458,17 +507,19 @@ void Backend::nextBatch(int count) {
         }
         if(cancellation->load())return QVariantMap{{"cancelled",true}};
         return QVariantMap{{"count",n},{"note",note}};
-    },[this](const auto &r){
-        if(r["cancelled"].toBool()){m_status="已取消加载下一批";return;}
+    },[this,notify](const auto &r){
+        if(r["cancelled"].toBool()){m_status="已取消加载下一批";if(notify)emit operationFinished("warning","加载已取消",m_status);return;}
         int n=r["count"].toInt();m_items=m_queue.mid(0,n);m_queue=m_queue.mid(n);if(n)++m_batch;
         m_status=r["note"].toString();if(m_status.isEmpty())m_status=n?QString("第 %1 批，%2 项").arg(m_batch).arg(n):"当前来源已无待加载文件，可浏览其他目录继续整理";
-        persist();
-    },false,"取消加载");
+        const bool saved=persist();
+        if(notify)emit operationFinished(saved?"success":"warning",saved?"批次加载完成":"批次已加载，记录未保存",m_status);
+    },false,"取消加载",notify?"加载下一批":QString());
 }
 void Backend::extendBatch(int count) {
     if(m_busy)return;count=qBound(1,count,100);
     const auto added=std::min(count,int(m_queue.size()));
-    m_items.append(m_queue.mid(0,count));Media::sortByCaptureTime(m_items);m_queue=m_queue.mid(count);m_status=QString("已将后续 %1 项加入当前批次").arg(added);persist();emit changed();
+    m_items.append(m_queue.mid(0,count));Media::sortByCaptureTime(m_items);m_queue=m_queue.mid(count);m_status=QString("已将后续 %1 项加入当前批次").arg(added);
+    const bool saved=persist();emit changed();emit operationFinished(saved?"success":"warning",saved?"已加入当前批次":"已加入，记录未保存",m_status);
 }
 void Backend::removeItems(const QStringList &ids) {
     for(const auto &id:ids)consumed.insert(id);
@@ -483,10 +534,11 @@ void Backend::copyAssets(const QStringList &ids,const QString &target) {
     transferAssets(ids,target,true);
 }
 void Backend::transferAssets(const QStringList &ids,const QString &target,bool copyOnly) {
-    if(m_busy)return;if(m_pending){emit message("存在未完成操作，请先核对记录");return;}
-    if(!QFileInfo(target).isDir()){emit message("请先选择有效目标目录");return;}
+    const QString action=copyOnly?"复制":"移动";
+    if(m_busy)return;if(m_pending){emit operationFinished("error",action+"未完成","存在未完成操作，请先核对操作记录");return;}
+    if(!QFileInfo(target).isDir()){emit operationFinished("error",action+"未完成","请先选择有效目标目录");return;}
     QVariantList selected;for(const auto &id:ids){auto a=asset(id);if(!a.isEmpty())selected.append(a);}
-    if(selected.isEmpty())return;
+    if(selected.isEmpty()){emit operationFinished("error",action+"未完成","所选文件已不在当前列表，请刷新后重试");return;}
     const auto db=database;const auto cancellation=stop;
     run(copyOnly?"校验并复制原文件…":"校验并移动原文件…",[=]{
         Store s(db);FileOps f(s);QStringList done,errors;
@@ -502,7 +554,54 @@ void Backend::transferAssets(const QStringList &ids,const QString &target,bool c
             }catch(const std::exception &e){errors.append(a["name"].toString()+"："+QString::fromUtf8(e.what()));}
         }
         return QVariantMap{{"done",done},{"errors",errors},{"pending",f.reconcile().size()}};
-    },[this,copyOnly](const auto &r){if(!copyOnly)removeItems(r["done"].toStringList());m_pending=r["pending"].toInt();m_status=QString(copyOnly?"已复制 %1 项，原文件保留，可继续选择其他目录":"已移动 %1 项").arg(r["done"].toStringList().size());auto e=r["errors"].toStringList();if(!e.isEmpty()){m_status+="；"+e.join("\n");emit message(m_status);}if(!copyOnly&&m_items.isEmpty())nextBatch();},true,copyOnly?"停止复制":"停止移动");
+    },[this,copyOnly,action,total=selected.size()](const auto &r){
+        const auto done=r["done"].toStringList();const auto errors=r["errors"].toStringList();
+        if(!copyOnly)removeItems(done);m_pending=r["pending"].toInt();
+        const int skipped=int(total)-int(done.size())-int(errors.size());
+        m_status=QString(copyOnly?"已复制 %1 项，原文件保留":"已移动 %1 项").arg(done.size());
+        if(!errors.isEmpty())m_status+=QString("；%1 项未完成").arg(errors.size());
+        if(skipped>0)m_status+=QString("；%1 项未执行").arg(skipped);
+        const bool complete=done.size()==total;
+        emit operationFinished(complete?"success":done.isEmpty()&&!errors.isEmpty()?"error":"warning",
+            action+(complete?"完成":skipped>0?"已停止":done.isEmpty()?"失败":"部分完成"),m_status+(errors.isEmpty()?QString():"\n"+errors.join("\n")));
+        if(!copyOnly&&m_items.isEmpty())nextBatch();
+    },true,copyOnly?"停止复制":"停止移动",action,true);
+}
+void Backend::deleteAssets(const QStringList &ids) {
+    if(m_busy)return;
+    if(m_pending){emit operationFinished("error","删除未完成","存在未完成操作，请先核对操作记录");return;}
+    QVariantList selected;QSet<QString> seen;
+    for(const auto &id:ids){const auto a=asset(id);if(!a.isEmpty()&&!seen.contains(id)){selected.append(a);seen.insert(id);}}
+    if(selected.isEmpty())return;
+    const auto db=database;const auto cancellation=stop;
+    run("正在移入回收站…",[=]{
+        Store s(db);FileOps f(s);QStringList done,removed,errors;
+        for(const auto &v:selected){
+            if(cancellation->load())break;
+            const auto a=v.toMap();const auto id=a["id"].toString(),path=a["path"].toString();
+            try {
+                if(!a["blocked"].toString().isEmpty())fail(a["blocked"].toString());
+                QVariantList members{a};if(a["liveType"]=="apple")members.append(a["liveVideo"]);
+                QVariantList snapshots;
+                for(const auto &member:members){auto m=member.toMap();const auto st=FileOps::stamp(m["path"].toString(),true);
+                    if(st.size!=m["size"].toLongLong()||st.mtime!=m["mtime"].toLongLong())fail("文件已变化，请刷新后重试");
+                    m["sha"]=st.sha;m["identity"]=st.identity;snapshots.append(m);
+                }
+                f.recycle(snapshots,id);done.append(id);
+            }catch(const std::exception &e){errors.append(a["name"].toString()+"："+QString::fromUtf8(e.what()));}
+            if(!QFileInfo::exists(path))removed.append(id);
+        }
+        return QVariantMap{{"done",done},{"removed",removed},{"errors",errors},{"pending",f.reconcile().size()},{"cancelled",cancellation->load()}};
+    },[this](const auto &r){
+        removeItems(r["removed"].toStringList());m_pending=r["pending"].toInt();
+        m_status=QString("已将 %1 项移入回收站").arg(r["done"].toStringList().size());
+        if(r["cancelled"].toBool())m_status+="；其余操作已停止";
+        const auto errors=r["errors"].toStringList();if(!errors.isEmpty())m_status+=QString("；%1 项未删除").arg(errors.size());
+        const bool complete=errors.isEmpty()&&!r["cancelled"].toBool();
+        emit operationFinished(complete?"success":r["done"].toStringList().isEmpty()&&!errors.isEmpty()?"error":"warning",
+            complete?"删除完成":r["cancelled"].toBool()?"删除已停止":"删除未全部完成",m_status+(errors.isEmpty()?QString():"\n"+errors.join("\n")));
+        if(m_items.isEmpty()&&!m_pending&&!r["cancelled"].toBool())nextBatch();
+    },true,"停止删除","删除",true);
 }
 void Backend::cancel(){
     if(!m_busy||m_cancelAction.isEmpty()||m_cancelRequested)return;
@@ -535,7 +634,7 @@ void Backend::undo(const QString &id) {
     if(m_busy)return;const auto db=database;
     run("核对并撤销移动…",[=]{Store s(db);FileOps f(s);auto old=s.rows("SELECT * FROM operations WHERE id=?",{id});QString p=f.undo(id);
         if(old[0].toMap()["kind"]=="live_move")for(const auto &v:s.rows("SELECT source,target FROM live_members WHERE group_id=?",{id})){const auto r=v.toMap();s.exec("UPDATE assets SET path=? WHERE path=?",{r["source"],r["target"]});}
-        else s.exec("UPDATE assets SET path=? WHERE path=?",{p,old[0].toMap()["target"]});return QVariantMap{{"path",p}};},[this](const auto &){m_status="已撤销，重新打开原目录可继续整理";loadHistory();},true);
+        else s.exec("UPDATE assets SET path=? WHERE path=?",{p,old[0].toMap()["target"]});return QVariantMap{{"path",p}};},[this](const auto &){m_status="已撤销，重新打开原目录可继续整理";loadHistory();},true,{},{},true);
 }
 void Backend::recover(const QString &id) {
     if(m_busy)return;const auto db=database,root=m_targetRoot;
@@ -550,9 +649,28 @@ void Backend::recover(const QString &id) {
             const auto member=v.toMap();for(const auto &a:s.rows("SELECT id FROM assets WHERE path=?",{member["source"]}))done.append(a.toMap()["id"].toString());
             s.exec("UPDATE assets SET path=? WHERE path=?",{member["target"],member["source"]});
         }
-        return QVariantMap{{"done",done},{"pending",f.reconcile().size()},{"renameFrom",old["kind"]=="rename_directory"?old["source"]:QVariant()},{"renameTo",p},
+        if((old["kind"]=="recycle"||old["kind"]=="trash")&&!QFileInfo::exists(old["source"].toString()))
+            for(const auto &v:s.rows("SELECT id FROM assets WHERE path=?",{old["source"]}))done.append(v.toMap()["id"].toString());
+        const auto updated=s.rows("SELECT state,error FROM operations WHERE id=?",{id})[0].toMap();
+        const bool replaced=old["kind"]=="replace_image"&&updated["state"]=="committed";
+        QVariantMap replacement;QString replacedId;
+        if(replaced){
+            const auto previous=s.rows("SELECT id FROM assets WHERE path=?",{p});if(!previous.isEmpty())replacedId=previous[0].toMap()["id"].toString();
+            const QFileInfo file(p);
+            s.exec("DELETE FROM drafts WHERE asset IN (SELECT id FROM assets WHERE path=?)",{p});
+            s.exec("UPDATE assets SET id=?,size=?,mtime=?,type='图片',blocked='' WHERE path=?",{QUuid::createUuid().toString(QUuid::WithoutBraces),file.size(),file.lastModified().toMSecsSinceEpoch(),p});
+        }
+        if(replaced)for(const auto &value:Media::scan(s,{QFileInfo(p).absolutePath()},false,std::make_shared<std::atomic_bool>(false)))if(value.toMap()["path"]==p){replacement=value.toMap();break;}
+        return QVariantMap{{"replacement",replacement},{"replacedId",replacedId},{"done",done},{"pending",f.reconcile().size()},{"renameFrom",old["kind"]=="rename_directory"?old["source"]:QVariant()},{"renameTo",p},
+                           {"recycleMessage",(old["kind"]=="recycle"||old["kind"]=="trash")?(updated["state"]=="abandoned"?updated["error"]:QVariant("已核对，文件已移入回收站")):QVariant()},
                            {"treeRoot",old["kind"]=="rename_directory"?FileOps::relocatedPath(root,old["source"].toString(),p):root}};
-    },[this](const auto &r){if(!r["renameFrom"].toString().isEmpty())applyDirectoryRename(r["renameFrom"].toString(),r["renameTo"].toString());removeItems(r["done"].toStringList());m_pending=r["pending"].toInt();m_status="已核对并完成操作";loadHistory();},true);
+    },[this](const auto &r){
+        const auto replacement=r["replacement"].toMap();
+        if(!replacement.isEmpty()){
+            for(auto *list:{&m_items,&m_queue})for(auto &value:*list)if(value.toMap()["path"]==replacement["path"])value=replacement;
+            persist();emit cropOutputsReady(r["replacedId"].toString(),{replacement["id"].toString()},true);
+        }
+        if(!r["renameFrom"].toString().isEmpty())applyDirectoryRename(r["renameFrom"].toString(),r["renameTo"].toString());removeItems(r["done"].toStringList());m_pending=r["pending"].toInt();m_status=r["recycleMessage"].toString().isEmpty()?"已核对并完成操作":r["recycleMessage"].toString();loadHistory();},true,{},{},true);
 }
 QVariantMap Backend::imageDimensions(const QString &id) try {
     const auto a=asset(id);if(a.isEmpty()||a["type"]=="视频")return {};
@@ -571,42 +689,61 @@ QVariantList Backend::loadDraft(const QString &id) try {
 bool Backend::saveDraft(const QString &id,const QVariantList &draft) try {
     auto a=asset(id);if(a.isEmpty() || m_busy)return false;Store s(database);s.exec("INSERT INTO drafts(asset,stamp,json) VALUES(?,?,?) ON CONFLICT(asset) DO UPDATE SET stamp=excluded.stamp,json=excluded.json",{id,version(a),json(draft)});return true;
 } catch(const std::exception &e) {emit message("草稿保存失败："+QString::fromUtf8(e.what()));return false;}
-void Backend::exportCrops(const QString &id,const QVariantList &draft,bool onlyCrop) {
-    if(m_busy)return;auto a=asset(id);if(a.isEmpty()||draft.isEmpty())return;
-    if(m_pending){emit message("存在未完成操作，请先核对记录");return;}
-    if(!a["blocked"].toString().isEmpty()){emit message(a["blocked"].toString());return;}
-    if(a["type"]=="视频"){emit message("视频不支持裁剪");return;}
-    saveDraft(id,draft);const auto db=database;
+void Backend::exportCrops(const QString &id,const QVariantList &draft,bool onlyCrop,bool recycleOriginal,bool replaceOriginal) {
+    const QString action=replaceOriginal?"裁剪并覆盖原图":recycleOriginal?"裁剪并删除原图":onlyCrop?"裁剪":"裁剪并归类";
+    const auto reject=[&](const QString &reason){emit operationFinished("error",action+"未完成",reason);};
+    if(m_busy)return;auto a=asset(id);if(a.isEmpty()||draft.isEmpty()){reject("请选择图片并至少保留一个裁剪区域");return;}
+    if(m_pending){reject("存在未完成操作，请先核对操作记录");return;}
+    if(!a["blocked"].toString().isEmpty()){reject(a["blocked"].toString());return;}
+    if(a["type"]=="视频"){reject("视频不支持裁剪");return;}
+    if(replaceOriginal&&(draft.size()!=1||recycleOriginal)){reject("覆盖原图只支持一个裁剪区域");return;}
+    if(!saveDraft(id,draft)){reject("裁剪草稿未能保存，请检查数据目录后重试");return;}const auto db=database;
     run(onlyCrop?"裁剪并保存到原图目录…":"保存裁剪子图…",[=]{
         Store s(db);FileOps f(s);const auto path=a["path"].toString(),root=a["root"].toString();
         auto before=FileOps::stamp(path,true);
         if(before.size!=a["size"].toLongLong() || before.mtime!=a["mtime"].toLongLong())fail("原图已变化，请重新扫描");
+        QVariantList originals;
+        const auto extension=QFileInfo(path).suffix().toLower().toLatin1();
+        const bool inPlace=replaceOriginal&&QImageWriter::supportedImageFormats().contains(extension)&&QList<QByteArray>{"jpg","jpeg","png"}.contains(extension);
+        if(recycleOriginal||replaceOriginal) {
+            QVariantList members{a};if(a["liveType"]=="apple")members.append(a["liveVideo"]);
+            for(const auto &v:members){auto member=v.toMap();const auto st=member["path"]==path?before:FileOps::stamp(member["path"].toString(),true);
+                if(st.size!=member["size"].toLongLong()||st.mtime!=member["mtime"].toLongLong())fail("Live 原文件已变化，请刷新后重试");
+                member["sha"]=st.sha;member["identity"]=st.identity;originals.append(member);
+            }
+        }
         const auto sourceDirectory=QFileInfo(path).absolutePath();
-        if(!onlyCrop)for(const auto &v:draft)if(!QFileInfo(v.toMap()["target"].toString()).isDir())fail("每个子图都需要有效目标目录，或使用“仅裁剪”先保存在原图目录");
+        if(!onlyCrop&&!replaceOriginal)for(const auto &v:draft)if(!QFileInfo(v.toMap()["target"].toString()).isDir())fail("每个子图都需要有效目标目录，或使用“仅裁剪”先保存在原图目录");
         const auto oriented=Media::read(path);const auto captureTime=Media::captureTime(path);
         // Validate every child before writing any output, including unvisited saved drafts.
         for(const auto &v:draft) {const auto spec=v.toMap();CropGeometry(oriented.size(),spec.value("angle").toDouble()).checkedPixelRect(spec);}
-        int n=0;QStringList outputKeys,outputs;QVariantList localOutputs;
+        int n=0;QStringList outputKeys,outputs;QSet<QString> freshOutputs;QVariantList localOutputs;QString replacementWarning;
         for(const auto &v:draft) {
-            auto spec=v.toMap();if(onlyCrop)spec["target"]=sourceDirectory;
+            auto spec=v.toMap();if(onlyCrop||replaceOriginal)spec["target"]=sourceDirectory;
             const double angle=spec["angle"].toDouble();if(!std::isfinite(angle)||abs(angle)>360)fail("旋转角度无效");
             auto output=Media::rotateAndCrop(oriented,spec);Media::inheritCaptureTime(output,captureTime);
             // Metadata changes are a new output format; do not reuse a legacy export without its time.
-            const auto key=QString::fromLatin1(QCryptographicHash::hash(("capture-time-v1:"+id+before.sha+json(spec)+json(captureTime)).toUtf8(),QCryptographicHash::Sha256).toHex());
-            const auto name=QFileInfo(path).completeBaseName()+QString("_crop_%1.png").arg(++n,3,10,QChar('0'));
-            outputs.append(f.writeImage(output,spec["target"].toString(),name,key,id));outputKeys.append(key);
+            const auto key=QString::fromLatin1(QCryptographicHash::hash(((replaceOriginal?"replace-png-v1:":"capture-time-v1:")+id+before.sha+json(spec)+json(captureTime)).toUtf8(),QCryptographicHash::Sha256).toHex());
+            ++n;const auto name=QFileInfo(path).completeBaseName()+(replaceOriginal?".png":QString("_crop_%1.png").arg(n,3,10,QChar('0')));
+            const auto result=inPlace?f.replaceImage(output,path,before,id):f.writeImage(output,spec["target"].toString(),name,key,id);
+            replacementWarning=result.warning;
+            outputs.append(result.path);outputKeys.append(result.operationId);
+            if(result.created)freshOutputs.insert(result.path);
         }
-        if(FileOps::hash(path)!=before.sha)fail("导出期间原图已变化，保留输出和原图，请重新扫描核对");
+        if(!inPlace&&FileOps::hash(path)!=before.sha)fail("导出期间原图已变化，保留输出和原图，请重新扫描核对");
         // Check the complete group again: an earlier child may have changed while later children were written.
         for(int i=0;i<outputs.size();++i) {
             const auto record=s.rows("SELECT sha,state FROM operations WHERE id=?",{outputKeys[i]})[0].toMap();
             if(record["state"]!="committed"||FileOps::hash(outputs[i])!=record["sha"].toString())fail("子图校验失败，原图保留，未记录学习样本");
         }
-        for(const auto &outputPath:outputs)if(QFileInfo(outputPath).absolutePath().compare(sourceDirectory,Qt::CaseInsensitive)==0) {
+        for(const auto &outputPath:outputs) {
             const QFileInfo file(outputPath);const auto old=s.rows("SELECT id FROM assets WHERE path=?",{outputPath});
-            const auto outputId=old.isEmpty()?QUuid::createUuid().toString(QUuid::WithoutBraces):old[0].toMap()["id"].toString();
-            s.exec("INSERT INTO assets(id,path,root,size,mtime,type,blocked) VALUES(?,?,?,?,?,'图片','') ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime=excluded.mtime,type=excluded.type,blocked=''",{outputId,outputPath,root,file.size(),file.lastModified().toMSecsSinceEpoch()});
-            localOutputs.append(QVariantMap{{"id",outputId},{"path",outputPath},{"root",root},{"name",file.fileName()},{"size",file.size()},{"mtime",file.lastModified().toMSecsSinceEpoch()},{"type","图片"},{"blocked",""},{"kind",""},{"url",QUrl::fromLocalFile(outputPath).toString()},{"thumb","image://media/"+outputId+"/0/"+QString::number(file.lastModified().toMSecsSinceEpoch())}});
+            // A newly written file may reuse a deleted child's pathname, but
+            // must never inherit that child's identity or crop draft. A verified
+            // idempotent export, in contrast, keeps its existing identity.
+            const auto outputId=old.isEmpty()||freshOutputs.contains(outputPath)?QUuid::createUuid().toString(QUuid::WithoutBraces):old[0].toMap()["id"].toString();
+            s.exec("INSERT INTO assets(id,path,root,size,mtime,type,blocked) VALUES(?,?,?,?,?,'图片','') ON CONFLICT(path) DO UPDATE SET id=excluded.id,size=excluded.size,mtime=excluded.mtime,type=excluded.type,blocked=''",{outputId,outputPath,root,file.size(),file.lastModified().toMSecsSinceEpoch()});
+            if(file.absolutePath().compare(sourceDirectory,Qt::CaseInsensitive)==0)localOutputs.append(QVariantMap{{"id",outputId},{"path",outputPath},{"root",root},{"name",file.fileName()},{"size",file.size()},{"mtime",file.lastModified().toMSecsSinceEpoch()},{"type","图片"},{"blocked",""},{"kind",""},{"url",QUrl::fromLocalFile(outputPath).toString()},{"thumb","image://media/"+outputId+"/0/"+QString::number(file.lastModified().toMSecsSinceEpoch())}});
         }
         for(auto &value:localOutputs){auto item=value.toMap();const auto time=Media::captureTime(item["path"].toString());
             item["isLive"]=false;
@@ -617,14 +754,36 @@ void Backend::exportCrops(const QString &id,const QVariantList &draft,bool onlyC
         const auto learningKey=QString::fromLatin1(QCryptographicHash::hash(outputKeys.join('|').toUtf8(),QCryptographicHash::Sha256).toHex());
         try {SmartCropRecords::save(SmartCropRecords::rootFor(db),oriented,before.sha,draft,learningKey);}
         catch(const std::exception &e){learningWarning="裁剪已成功，但学习记录保存失败："+QString::fromUtf8(e.what());}
-        return QVariantMap{{"count",n},{"learningWarning",learningWarning},{"localOutputs",localOutputs}};
-    },[this,id,onlyCrop](const auto &r){
+        QString recycleWarning=replacementWarning;bool recycled=false;
+        if(inPlace)originals.removeFirst(); // The old cover was atomically replaced; only a paired video remains.
+        if(recycleOriginal||replaceOriginal)try {if(!originals.isEmpty())f.recycleAfterExport(originals,outputKeys,id);recycled=true;}
+        catch(const std::exception &e){recycleWarning="子图已保存，原文件回收未全部完成："+QString::fromUtf8(e.what());}
+        return QVariantMap{{"count",n},{"learningWarning",learningWarning},{"localOutputs",localOutputs},
+                           {"recycled",recycled},{"inPlace",inPlace},{"originalGone",inPlace||((recycleOriginal||replaceOriginal)&&!QFileInfo::exists(path))},
+                           {"recycleWarning",recycleWarning},{"pending",f.reconcile().size()}};
+    },[this,id,onlyCrop,recycleOriginal,replaceOriginal,action](const auto &r){
+        // Drop stale entries for a filename that now belongs to a new export.
+        const auto localOutputs=r["localOutputs"].toList();QStringList localIds;
+        for(const auto &value:localOutputs){const auto output=value.toMap();localIds.append(output["id"].toString());
+            for(auto *list:{&m_items,&m_queue})for(qsizetype i=list->size();i-->0;){const auto old=list->at(i).toMap();
+                if(old["id"]!=output["id"]&&old["path"].toString().compare(output["path"].toString(),Qt::CaseInsensitive)==0)list->removeAt(i);
+            }
+        }
         QSet<QString> added;int insertAt=m_items.size();
         for(int i=0;i<m_items.size();++i){added.insert(m_items[i].toMap()["id"].toString());if(m_items[i].toMap()["id"]==id)insertAt=i+1;}
-        for(const auto &v:r["localOutputs"].toList()) {const auto outputId=v.toMap()["id"].toString();if(!added.contains(outputId)){m_items.insert(insertAt++,v);added.insert(outputId);consumed.remove(outputId);}}
+        for(const auto &v:localOutputs) {const auto outputId=v.toMap()["id"].toString();
+            if(!added.contains(outputId)){m_items.insert(insertAt++,v);added.insert(outputId);consumed.remove(outputId);}
+            else for(auto &item:m_items)if(item.toMap()["id"]==outputId){item=v;break;}
+        }
         Media::sortByCaptureTime(m_items);
         for(qsizetype i=m_queue.size();i-->0;)if(added.contains(m_queue[i].toMap()["id"].toString()))m_queue.removeAt(i);
-        persist();m_smartCrop->recordsChanged();m_status=QString(onlyCrop?"已生成 %1 个子图并加入当前列表，原图保留，可继续分别移动":"已保存 %1 个 PNG 子图，原图保留在原位置").arg(r["count"].toInt());if(!r["learningWarning"].toString().isEmpty())emit message(r["learningWarning"].toString());
-    },true);
+        if(r["originalGone"].toBool())removeItems({id});
+        m_pending=r["pending"].toInt();persist();m_smartCrop->recordsChanged();
+        m_status=QString(recycleOriginal?(r["recycled"].toBool()?"已保存 %1 个 PNG 子图，原文件已移入回收站":"已保存 %1 个 PNG 子图，原文件回收未全部完成"):onlyCrop?"已生成 %1 个子图并加入当前列表，原图保留，可继续分别移动":"已保存 %1 个 PNG 子图，原图保留在原位置").arg(r["count"].toInt());
+        if(replaceOriginal)m_status=r["inPlace"].toBool()?"原图已替换为裁剪后的静态图片，位置和文件名不变":r["recycled"].toBool()?"已在原目录保存静态 PNG，原文件已移入回收站":"静态 PNG 已保存，原文件回收未全部完成";
+        QStringList warnings;for(const auto &key:{"learningWarning","recycleWarning"})if(!r[key].toString().isEmpty())warnings.append(r[key].toString());
+        emit cropOutputsReady(id,localIds,r["originalGone"].toBool());
+        emit operationFinished(warnings.isEmpty()?"success":"warning",action+(warnings.isEmpty()?"完成":"部分完成"),m_status+(warnings.isEmpty()?QString():"\n"+warnings.join("\n")));
+    },true,{},action,true);
 }
 void Backend::reveal(const QString &input){const auto p=Media::path(input);QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(p).isDir()?p:QFileInfo(p).absolutePath()));}

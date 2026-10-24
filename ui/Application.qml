@@ -7,7 +7,7 @@ ApplicationWindow {
     id: app
     visible: true; width: 1460; height: 920; minimumWidth: 1120; minimumHeight: 720
     title: "归图 · ImageClassifier"; color: "#f3f5f6"
-    palette.highlight: "#16756a"; palette.buttonText: "#3e4c53"; palette.text: "#3e4c53"
+    palette.highlight: Theme.primary; palette.buttonText: "#3e4c53"; palette.text: "#3e4c53"
     palette.base: "#ffffff"; palette.window: "#fafbfc"; palette.button: "#edf1f2"; palette.windowText: "#3e4c53"; palette.highlightedText: "#ffffff"
     property bool largeMode: false
     property bool preferencesLoaded: false
@@ -24,12 +24,16 @@ ApplicationWindow {
     property string pickerPurpose: "source"
     property string notice: ""
     property var previousFiltered: []
+    property var pendingCropFocusIds: []
     property var directorySelectionSnapshot: ({})
     readonly property int hiddenSelectedCount: selection.filter(id=>!filtered.some(a=>a.id===id)).length
-    readonly property bool modalOpen: backend.restarting||noticeDialog.visible||sourcesDialog.visible||historyDialog.visible||clearHistoryDialog.visible||newDirectory.visible||renameDirectoryDialog.visible||folderPicker.visible
+    readonly property bool modalOpen: deleteFilesDialog.visible||backend.restarting||noticeDialog.visible||sourcesDialog.visible||historyDialog.visible||clearHistoryDialog.visible||newDirectory.visible||renameDirectoryDialog.visible||folderPicker.visible
     readonly property bool textEditing: activeFocusItem && activeFocusItem.cursorPosition !== undefined
     onFilteredChanged: {
-        if(!filtered.some(a=>a.id===focusId)) {
+        const cropChild=pendingCropFocusIds.find(id=>filtered.some(a=>a.id===id));
+        pendingCropFocusIds=[];
+        if(cropChild)focusId=cropChild;
+        else if(!filtered.some(a=>a.id===focusId)) {
             const oldIndex=previousFiltered.findIndex(a=>a.id===focusId);
             const surviving=previousFiltered.slice(Math.max(0,oldIndex+1)).concat(previousFiltered.slice(0,Math.max(0,oldIndex)).reverse()).find(a=>filtered.some(b=>b.id===a.id));
             focusId=surviving?surviving.id:(filtered.length?filtered[0].id:"");
@@ -46,6 +50,7 @@ ApplicationWindow {
         if(!preferencesLoaded)return;
         backend.largeMode=largeMode;
         if(largeMode)editor.enterEditing();
+        else grid.revealBrowsedItem(focusId);
     }
     function tell(s) {notice=s;noticeDialog.open()}
     function openSettings() {
@@ -73,9 +78,21 @@ ApplicationWindow {
     }
     function navigate(n) {let i=currentIndex+n;if(i>=0&&i<filtered.length)openImage(filtered[i].id)}
     function transferSelection(copyOnly) {
-        editor.flushDraft();editor.stopPlayback();editor.invalidateSuggestion();
+        if(!editor.flushDraft()){operationToast.show("error",copyOnly?"复制未完成":"移动未完成","裁剪草稿未能保存，请检查数据目录后重试");return;}
+        editor.stopPlayback();editor.invalidateSuggestion();
         const ids=largeMode?[focusId]:selection;
         if(copyOnly)backend.copyAssets(ids,destination);else backend.moveAssets(ids,destination);
+    }
+    function requestDelete() {
+        if(backend.busy||modalOpen||settingsOpen)return;
+        const ids=largeMode?(current.id?[current.id]:[]):selection.slice();
+        if(!ids.length)return;
+        if(!editor.flushDraft())return;
+        editor.stopPlayback();editor.invalidateSuggestion();
+        deleteFilesDialog.assetIds=ids;
+        deleteFilesDialog.hiddenCount=largeMode?0:hiddenSelectedCount;
+        deleteFilesDialog.filename=largeMode?current.name:"";
+        deleteFilesDialog.open();
     }
     function toggle(id) {focusId=id;let a=selection.slice();let i=a.indexOf(id);if(i>=0)a.splice(i,1);else a.push(id);selection=a}
     function chooseFolder(purpose) {pickerPurpose=purpose;folderPicker.open()}
@@ -95,6 +112,11 @@ ApplicationWindow {
         target: backend
         function onLargeModeChanged() {if(app.preferencesLoaded)app.largeMode=backend.largeMode}
         function onMessage(text) {if(sourcesDialog.submitting)sourcesDialog.report(text,true);else app.tell(text)}
+        function onOperationFinished(outcome,title,detail) {operationToast.show(outcome,title,detail)}
+        function onCropOutputsReady(sourceId,localIds,originalRemoved) {
+            if(originalRemoved&&app.largeMode&&app.focusId===sourceId)app.pendingCropFocusIds=localIds;
+        }
+        function onDirectoryCountsChanged(changes) {directoryTree.showCountChanges(changes)}
         function onDirectoryCreated(parent,path) {directoryTree.expandDirectory(parent)}
         function onDirectoryRenamed(from,to) {
             editor.relocateTargets(from,to);
@@ -121,8 +143,9 @@ ApplicationWindow {
     Shortcut {sequence:"F5";enabled:!app.settingsOpen&&!backend.busy&&!app.modalOpen;onActivated:app.refreshWorkspace()}
     ColumnLayout {
         anchors.fill:parent;spacing:0;visible:!app.settingsOpen;enabled:visible&&!backend.restarting
-        Rectangle {
-            Layout.fillWidth:true;Layout.preferredHeight:60;color:"#202629"
+        ThemeHeader {
+            objectName:"workspaceHeader"
+            Layout.fillWidth:true;Layout.preferredHeight:60
             RowLayout {
                 anchors.left:parent.left;anchors.leftMargin:20;anchors.verticalCenter:parent.verticalCenter
                 width:Math.min(440,parent.width/2-132);spacing:12
@@ -130,32 +153,32 @@ ApplicationWindow {
                     objectName:"applicationLogo"
                     Layout.minimumWidth:28;Layout.preferredWidth:28;Layout.maximumWidth:28
                     Layout.minimumHeight:28;Layout.preferredHeight:28;Layout.maximumHeight:28
-                    source:"brand/guitu-header.svg";sourceSize:Qt.size(84,84);fillMode:Image.PreserveAspectFit
+                    source:Theme.lightSurface?"brand/guitu-mark.svg":"brand/guitu-header.svg";sourceSize:Qt.size(84,84);fillMode:Image.PreserveAspectFit
                 }
-                Text {text:"归图";font.pixelSize:18;font.weight:Font.DemiBold;color:"#f4f7f7"}
-                Rectangle {width:1;height:18;color:"#465054";Layout.leftMargin:6;Layout.rightMargin:2}
-                UiButton {objectName:"sourcesButton";text:backend.sources.length?"来源目录 · "+backend.sources.length:"添加来源";hint:"管理当前浏览的来源目录，或添加其他目录";iconName:"folder";dark:true;quiet:true;enabled:!backend.busy;onClicked:sourcesDialog.open()}
+                Text {text:"归图";font.pixelSize:18;font.weight:Font.DemiBold;color:Theme.surfaceInk}
+                Rectangle {width:1;height:18;color:Theme.alpha(Theme.surfaceInk,.25);Layout.leftMargin:6;Layout.rightMargin:2}
+                UiButton {objectName:"sourcesButton";text:backend.sources.length?"来源目录 · "+backend.sources.length:"添加来源";hint:"管理当前浏览的来源目录，或添加其他目录";iconName:"folder";onAccent:true;quiet:true;enabled:!backend.busy;onClicked:sourcesDialog.open()}
                 Text {
                     Layout.fillWidth:true;Layout.minimumWidth:0
                     text:backend.sources.length?((app.browsingPath?app.browsingPath.replace(/\\/g,"/").split("/").pop()+" · ":"")+backend.items.length+" 项"):"本地图片整理"
-                    elide:Text.ElideMiddle;color:"#a5b2b7";font.pixelSize:12
+                    elide:Text.ElideMiddle;color:Theme.surfaceInk;font.pixelSize:12
                     ToolTip.visible:sourceHover.hovered;ToolTip.text:backend.sources.join("\n");ToolTip.delay:600
                     HoverHandler {id:sourceHover}
                 }
             }
             Rectangle {
-                anchors.centerIn:parent;width:218;height:38;radius:9;color:"#141b1e";border.color:"#3c464b"
+                anchors.centerIn:parent;width:218;height:38;radius:9;color:Theme.lightSurface?"#26ffffff":"#22000000";border.color:Theme.alpha(Theme.surfaceInk,.16)
                 Row {anchors.centerIn:parent;spacing:4
-                    UiButton {objectName:"batchModeButton";text:"批量模式";hint:"多选图片或视频，批量移动到目标目录";iconName:"grid";dark:true;implicitWidth:103;implicitHeight:30;chosen:!app.largeMode;quiet:true;onClicked:{editor.flushDraft();app.largeMode=false}}
-                    UiButton {objectName:"largeModeButton";text:"大图模式";hint:"逐张查看图片，保留上次的裁剪模式选择";iconName:"image";dark:true;implicitWidth:103;implicitHeight:30;chosen:app.largeMode;quiet:true;onClicked:app.largeMode=true}
+                    UiButton {objectName:"batchModeButton";text:"批量模式";hint:"多选图片或视频，批量移动到目标目录";iconName:"grid";onAccent:true;implicitWidth:103;implicitHeight:30;chosen:!app.largeMode;quiet:true;onClicked:{editor.flushDraft();app.largeMode=false}}
+                    UiButton {objectName:"largeModeButton";text:"大图模式";hint:"逐张查看图片，保留上次的裁剪模式选择";iconName:"image";onAccent:true;implicitWidth:103;implicitHeight:30;chosen:app.largeMode;quiet:true;onClicked:app.largeMode=true}
                 }
             }
             Row {anchors.right:parent.right;anchors.rightMargin:18;anchors.verticalCenter:parent.verticalCenter;spacing:8
-                UiButton {objectName:"restartApplicationButton";text:backend.restarting?"正在重启…":"重启应用";iconName:"restart";dark:true;quiet:true;enabled:!backend.busy&&!backend.restarting&&!app.modalOpen;hint:backend.busy?"当前操作完成后可重启":"保存当前草稿并重新打开归图";onClicked:app.restartApplication()}
-                UiButton {objectName:"historyButton";text:"操作记录"+(backend.pending?" · "+backend.pending+" 待处理":"");hint:"查看文件操作记录、撤销移动或继续未完成的操作";iconName:"history";dark:true;quiet:true;enabled:!backend.busy;onClicked:{backend.loadHistory();historyDialog.open()}}
-                UiButton {objectName:"settingsButton";text:"设置";iconName:"settings";dark:true;quiet:true;implicitWidth:76;hint:"打开设置";onClicked:app.openSettings()}
+                UiButton {objectName:"restartApplicationButton";text:backend.restarting?"正在重启…":"重启应用";iconName:"restart";onAccent:true;quiet:true;enabled:!backend.busy&&!backend.restarting&&!app.modalOpen;hint:backend.busy?"当前操作完成后可重启":"保存当前草稿并重新打开归图";onClicked:app.restartApplication()}
+                UiButton {objectName:"historyButton";text:"操作记录"+(backend.pending?" · "+backend.pending+" 待处理":"");hint:"查看文件操作记录、撤销移动或继续未完成的操作";iconName:"history";onAccent:true;quiet:true;enabled:!backend.busy;onClicked:{backend.loadHistory();historyDialog.open()}}
+                UiButton {objectName:"settingsButton";text:"设置";iconName:"settings";onAccent:true;quiet:true;implicitWidth:76;hint:"打开设置";onClicked:app.openSettings()}
             }
-            Rectangle {anchors.bottom:parent.bottom;width:parent.width;height:1;color:"#354047"}
+            Rectangle {anchors.bottom:parent.bottom;width:parent.width;height:1;color:"#22000000"}
         }
         RowLayout {
             Layout.fillWidth:true;Layout.fillHeight:true;spacing:0
@@ -207,7 +230,7 @@ ApplicationWindow {
                             if(prior.target!==undefined){app.destination=prior.target;if(app.largeMode&&prior.asset===editor.loadedId&&prior.index===editor.selectedDraft)editor.assignTarget(prior.cropTarget)}
                             app.directorySelectionSnapshot=({});
                         }
-                        onDirectorySelected:path=>{app.destination=path;if(app.largeMode)editor.assignTarget(path)}
+                        onDirectorySelected:path=>app.destination=path
                         onDirectoryOpened:path=>app.viewDirectory(path)
                         onNewDirectoryRequested:path=>app.createChildDirectory(path)
                         onRenameDirectoryRequested:(path,name)=>{renameDirectoryDialog.directoryPath=path;renameDirectoryDialog.currentName=name;renameDirectoryDialog.open()}
@@ -232,7 +255,8 @@ ApplicationWindow {
                             Text {text:"缩略图";font.pixelSize:11;color:"#6c7b83"}
                             UiSlider {
                                 id:thumbSize;objectName:"workspaceThumbnailSize";Layout.preferredWidth:95
-                                from:170;to:310;value:backend.thumbnailSize;stepSize:35
+                                from:170;to:730;value:backend.thumbnailSize;stepSize:35
+                                ToolTip.visible:hovered;ToolTip.text:"在图片区域按住 Ctrl + 滚轮调整大小";ToolTip.delay:600
                                 onMoved:{backend.thumbnailSize=value;grid.queueSelectionReveal()}
                                 onPressedChanged:if(!pressed&&grid.pendingSelectionId!=="")selectionRevealTimer.restart()
                             }
@@ -241,8 +265,30 @@ ApplicationWindow {
                             }
                         }
                     }
-                    GridView {id:grid;objectName:"batchGrid";Layout.fillWidth:true;Layout.fillHeight:true;Layout.margins:12;clip:true;model:app.filtered
+                    GridView {id:grid;objectName:"batchGrid";Layout.fillWidth:true;Layout.fillHeight:true;clip:true;model:app.filtered
                         cacheBuffer:Math.max(height,cellHeight*2)
+                        property string pendingBrowseId:""
+                        property int browseRevealAttempts:0
+                        function revealBrowsedItem(id) {
+                            selectionRevealTimer.stop();pendingSelectionId="";
+                            pendingBrowseId=id;browseRevealAttempts=0;
+                            if(id!=="")browseRevealTimer.restart();
+                        }
+                        Timer {
+                            id:browseRevealTimer;interval:16
+                            onTriggered:{
+                                const id=grid.pendingBrowseId;
+                                const index=app.filtered.findIndex(a=>a.id===id);
+                                if(app.largeMode||app.settingsOpen||index<0){grid.pendingBrowseId="";return;}
+                                // Wait for the batch layout, then materialize the virtualized card.
+                                grid.cancelFlick();grid.forceLayout();
+                                grid.positionViewAtIndex(index,GridView.Center);grid.forceLayout();
+                                const card=grid.itemAtIndex(index);
+                                if(card&&card.asset.id===id){grid.pendingBrowseId="";card.pulse();}
+                                else if(++grid.browseRevealAttempts<8)restart();
+                                else grid.pendingBrowseId="";
+                            }
+                        }
                         property string pendingSelectionId:""
                         function queueSelectionReveal() {
                             pendingSelectionId="";
@@ -266,9 +312,31 @@ ApplicationWindow {
                                 grid.positionViewAtIndex(index,GridView.Center);
                             }
                         }
-                        property int columns:Math.max(2,Math.floor(width/thumbSize.value))
-                        cellWidth:Math.floor(width/columns);cellHeight:cellWidth*.73+36
+                        // Preserve the chosen density on larger windows instead of adding tiny columns.
+                        readonly property real thumbnailScale:Math.max(1,width)/1240
+                        property int columns:Math.max(2,Math.floor(width/(thumbSize.value*thumbnailScale)))
+                        cellWidth:width/columns;cellHeight:cellWidth
                         ScrollBar.vertical:ScrollBar {}
+                        WheelHandler {
+                            id:thumbnailWheel;target:null;acceptedModifiers:Qt.ControlModifier
+                            enabled:!app.largeMode&&!app.settingsOpen&&!app.modalOpen&&!backend.busy&&!batchSelection.dragging
+                            property real remainder:0
+                            onEnabledChanged:remainder=0
+                            onWheel:event=>{
+                                const delta=event.pixelDelta.y?event.pixelDelta.y*3:event.angleDelta.y;
+                                if(!delta){event.accepted=false;return;}
+                                event.accepted=true;
+                                if(remainder*delta<0)remainder=0;
+                                remainder+=delta;
+                                const steps=Math.trunc(remainder/120);
+                                remainder-=steps*120;thumbnailWheelReset.restart();
+                                if(!steps)return;
+                                const next=Math.max(thumbSize.from,Math.min(thumbSize.to,backend.thumbnailSize+steps*thumbSize.stepSize));
+                                if(next===backend.thumbnailSize)return;
+                                grid.cancelFlick();backend.thumbnailSize=next;grid.queueSelectionReveal();
+                            }
+                        }
+                        Timer {id:thumbnailWheelReset;interval:250;onTriggered:thumbnailWheel.remainder=0}
                         GridSelection {
                             id:batchSelection
                             parent:grid;anchors.fill:parent;gridView:grid;records:app.filtered;selectedIds:app.selection
@@ -284,7 +352,7 @@ ApplicationWindow {
                             enabled:!backend.busy
                             externalHovered:batchSelection.hoveredIndex===index
                             externalPressed:batchSelection.downIndex===index
-                            width:grid.cellWidth-10;height:grid.cellHeight-10
+                            width:grid.cellWidth;height:grid.cellHeight
                             photo:modelData.thumb;filename:modelData.name;kind:modelData.kind
                             asset:modelData;liveAvailable:!app.largeMode&&!app.settingsOpen&&!backend.busy
                             selected:app.selection.includes(modelData.id);focused:app.focusId===modelData.id
@@ -299,34 +367,42 @@ ApplicationWindow {
                     navigationItems:app.filtered;onImageRequested:assetId=>app.openImage(assetId)
                     onRefreshRequested:app.refreshWorkspace()
                     onPrevious:app.navigate(-1);onNext:app.navigate(1);onNotice:msg=>app.tell(msg)
+                    onExportRejected:msg=>operationToast.show("error","裁剪未完成",msg)
                 }
                 WorkspaceEmpty {objectName:"largeEmptyState";visible:app.largeMode&&app.filtered.length===0;Layout.fillWidth:true;Layout.fillHeight:true;title:app.emptyTitle;detail:app.emptyDetail;actionText:app.emptyActionText;busy:backend.busy;onActivated:app.emptyAction()}
                 Rectangle {Layout.fillWidth:true;Layout.preferredHeight:62;color:"#fafbfc"
                     Rectangle {width:parent.width;height:1;color:"#dce2e4"}
                     RowLayout {anchors.fill:parent;anchors.leftMargin:18;anchors.rightMargin:18;spacing:12
                         Text {text:app.largeMode?(app.current.id&&editor.cropActive?"当前图片 · "+editor.drafts.length+" 个裁剪区域":(app.current.id?"仅处理当前 1 项":"未选择文件")):"已选 "+app.selection.length+" 项";font.pixelSize:12;font.weight:Font.DemiBold;color:"#334950"}
-                        UiButton {objectName:"clearHiddenSelection";visible:!app.largeMode&&app.hiddenSelectedCount>0;text:app.hiddenSelectedCount+" 项已隐藏 · 取消选择";quiet:true;tone:"warning";hint:"这些已选文件被筛选隐藏，移动和复制仍会包含它们；点击只取消隐藏文件的选择";onClicked:app.selection=app.selection.filter(id=>app.filtered.some(a=>a.id===id))}
+                        UiButton {objectName:"clearHiddenSelection";visible:!app.largeMode&&app.hiddenSelectedCount>0;text:app.hiddenSelectedCount+" 项已隐藏 · 取消选择";quiet:true;tone:"warning";hint:"这些已选文件被筛选隐藏，移动、复制和删除仍会包含它们；点击只取消隐藏文件的选择";onClicked:app.selection=app.selection.filter(id=>app.filtered.some(a=>a.id===id))}
+                        UiButton {objectName:"deleteFilesButton";iconName:"trash";tone:"danger";implicitWidth:40;implicitHeight:40
+                            Accessible.name:app.largeMode?(editor.isVideo?"删除视频":"删除原图"):"删除所选"
+                            hint:app.largeMode?"删除当前原文件，移入回收站；不会导出裁剪区域":"删除所选 "+app.selection.length+" 项，移入回收站（包含筛选隐藏的选择）"
+                            enabled:!backend.busy&&backend.pending===0&&(app.largeMode?!!app.current.id&&!app.current.blocked:app.selection.length>0)
+                            onClicked:app.requestDelete()
+                        }
                         Item {Layout.fillWidth:true}
-                        Text {text:app.destination?(app.largeMode?"原文件移至：":"移至：")+app.destination:"请选择目标目录";Layout.fillWidth:true;ToolTip.visible:destinationHover.hovered;ToolTip.text:app.destination;ToolTip.delay:500;HoverHandler{id:destinationHover}Layout.maximumWidth:240;Layout.minimumWidth:0;elide:Text.ElideMiddle;font.pixelSize:11;color:"#667780"}
+                        Text {visible:!app.largeMode||!editor.cropActive;text:app.destination?"目标目录："+app.destination:"请选择目标目录";Layout.fillWidth:true;ToolTip.visible:destinationHover.hovered;ToolTip.text:app.destination;ToolTip.delay:500;HoverHandler{id:destinationHover}Layout.maximumWidth:240;Layout.minimumWidth:0;elide:Text.ElideMiddle;font.pixelSize:11;color:"#667780"}
                         UiButton {objectName:"cropOnlyButton";text:"仅裁剪";quiet:true;implicitHeight:40;visible:app.largeMode&&!!app.current.id&&editor.cropActive&&!editor.isVideo;enabled:!backend.busy&&editor.previewReady&&!app.current.blocked
                             hint:"子图保存在原图所在目录并加入列表，原图保留，无需选择目标目录"
                             onClicked:{editor.stopPlayback();editor.exportDrafts(true)}
                         }
-                        UiButton {objectName:"cropToTargetsButton";text:"裁剪并归类";implicitHeight:40;visible:app.largeMode&&!!app.current.id&&editor.cropActive&&!editor.isVideo;enabled:!backend.busy&&editor.previewReady&&!app.current.blocked
-                            hint:"按右侧各子图的独立目标保存，保留原图"
-                            onClicked:{editor.stopPlayback();editor.exportDrafts(false)}
+                        UiButton {objectName:"cropReplaceButton";text:"裁剪并覆盖原图";tone:"danger";implicitHeight:40;visible:app.largeMode&&!!app.current.id&&editor.cropActive&&editor.drafts.length===1;enabled:!backend.busy&&editor.previewReady&&!app.current.blocked
+                            hint:"用当前裁剪结果替换原图；JPG、PNG 保留文件名和格式，其他格式转为静态 PNG；旧原件移入回收站，Live 转为普通静态图片"
+                            onClicked:{editor.stopPlayback();editor.exportDrafts(true,false,true)}
                         }
-                        UiButton {objectName:"moveOriginalButton";text:app.largeMode?(editor.isVideo?"移动视频":"移动原图"):"移动所选 "+app.selection.length+" 项";primary:true;iconName:"move";implicitHeight:40;enabled:!backend.busy&&app.destination!==""&&(app.largeMode?!!app.current.id&&!app.current.blocked:app.selection.length>0)
+                        UiButton {objectName:"cropAndDeleteButton";text:"裁剪并删除原图";tone:"danger";implicitHeight:40;visible:app.largeMode&&!!app.current.id&&editor.cropActive&&editor.drafts.length>1;enabled:!backend.busy&&editor.previewReady&&!app.current.blocked
+                            hint:"全部子图保存到原图所在目录，校验成功后原图移入回收站；Live 的照片和配套视频一起回收"
+                            onClicked:{editor.stopPlayback();editor.exportDrafts(true,true)}
+                        }
+                        UiButton {objectName:"moveOriginalButton";text:"移动";visible:!app.largeMode||!editor.cropActive;primary:true;iconName:"move";selectionAccent:true;implicitHeight:40;enabled:!backend.busy&&app.destination!==""&&(app.largeMode?!!app.current.id&&!app.current.blocked:app.selection.length>0)
                             hint:app.largeMode?"将当前文件完整移到所选目录，不应用裁剪或旋转；原位置不再保留":"将全部已选文件移到所选目录（包含筛选隐藏的选择）；原位置不再保留"
                             onClicked:app.transferSelection(false)
                         }
-                        UiButton {
-                            id:fileMoreButton;objectName:"fileMoreButton";text:"更多";hint:"更多文件操作：复制到所选目录并保留来源文件";quiet:true;implicitWidth:48;implicitHeight:40
+                        UiButton {objectName:"copyOriginalButton";text:"复制";iconName:"copy";implicitHeight:40;visible:!app.largeMode||!editor.cropActive
                             enabled:!backend.busy&&app.destination!==""&&(app.largeMode?!!app.current.id&&!app.current.blocked:app.selection.length>0)
-                            onClicked:fileMenu.popup(0,-fileMenu.implicitHeight)
-                            UiMenu {id:fileMenu;parent:fileMoreButton
-                                UiMenuItem {objectName:"copyOriginalMenuItem";iconName:"copy";text:app.largeMode?"复制当前文件到所选目录":"复制所选 "+app.selection.length+" 项到所选目录";onTriggered:app.transferSelection(true)}
-                            }
+                            hint:app.largeMode?"复制当前文件到目标目录，保留原文件":"将全部已选文件复制到所选目录（包含筛选隐藏的选择），保留原文件"
+                            onClicked:app.transferSelection(true)
                         }
                     }
                 }
@@ -337,9 +413,15 @@ ApplicationWindow {
                 Text {text:backend.status;elide:Text.ElideRight;Layout.fillWidth:true;font.pixelSize:11;color:"#63757e"}
                 Text {text:"待加载 "+backend.remaining+" 项";font.pixelSize:11;color:"#6c7b83"}
                 UiButton {objectName:"extendBatchButton";text:"再加入 "+Math.min(10,backend.remaining)+" 项";quiet:true;implicitHeight:24;visible:backend.remaining>0;enabled:!backend.busy;hint:"把接下来的文件加入本批，便于将相关照片一起处理";onClicked:backend.extendBatch(10)}
-                UiButton {objectName:"batchTaskButton";text:backend.busy?(backend.cancelRequested?"正在停止…":backend.cancelAction||"处理中…"):"下一批";quiet:true;tone:backend.busy&&backend.cancelAction?"warning":"normal";implicitHeight:24;enabled:backend.busy?(!!backend.cancelAction&&!backend.cancelRequested):(backend.items.length===0&&backend.remaining>0);hint:backend.busy?"在安全位置停止，已完成的文件操作不会撤销":"当前批次移出全部文件后，加载下一批";onClicked:{if(backend.busy)backend.cancel();else backend.nextBatch(backend.batchSize)}}
+                UiButton {objectName:"batchTaskButton";text:backend.busy?(backend.cancelRequested?"正在停止…":backend.cancelAction||"处理中…"):"下一批";quiet:true;tone:backend.busy&&backend.cancelAction?"warning":"normal";implicitHeight:24;enabled:backend.busy?(!!backend.cancelAction&&!backend.cancelRequested):(backend.items.length===0&&backend.remaining>0);hint:backend.busy?"在安全位置停止，已完成的文件操作不会撤销":"当前批次移出全部文件后，加载下一批";onClicked:{if(backend.busy)backend.cancel();else backend.nextBatch(backend.batchSize,true)}}
             }
         }
+    }
+    OperationToast {
+        id:operationToast;objectName:"operationToast";parent:Overlay.overlay
+        anchors.right:parent.right;anchors.rightMargin:20
+        anchors.bottom:parent.bottom;anchors.bottomMargin:104
+        onDetailsRequested:text=>app.tell(text)
     }
     SettingsPage {
         id:settingsPage;objectName:"settingsPage";anchors.fill:parent;visible:app.settingsOpen;enabled:visible&&!backend.restarting
@@ -354,6 +436,20 @@ ApplicationWindow {
         onBeforeApply:{editor.flushDraft();editor.stopPlayback();editor.invalidateSuggestion()}
         onScopeApplied:scopeChanged=>{if(scopeChanged){app.selection=[];app.clearFilters()}}
     }
+    UiDialog {
+        id:deleteFilesDialog;objectName:"deleteFilesDialog";anchors.centerIn:parent;width:460;modal:true
+        title:"删除 "+assetIds.length+" 项？";acceptText:"移入回收站";acceptTone:"danger";standardButtons:Dialog.Ok|Dialog.Cancel
+        property var assetIds:[]
+        property int hiddenCount:0
+        property string filename:""
+        ColumnLayout {width:parent.width;spacing:12
+            Label {visible:deleteFilesDialog.filename!=="";text:deleteFilesDialog.filename;Layout.fillWidth:true;elide:Text.ElideMiddle}
+            Label {text:"文件将移入 Windows 回收站，可从回收站恢复。Live 图的照片与配套视频会一起删除。";Layout.fillWidth:true;wrapMode:Text.Wrap}
+            Label {visible:deleteFilesDialog.hiddenCount>0;text:"包含 "+deleteFilesDialog.hiddenCount+" 项被筛选隐藏的已选文件。";color:"#a33636";Layout.fillWidth:true;wrapMode:Text.Wrap}
+            Label {text:"此操作不导出裁剪区域，已保存的子图不受影响。";color:"#667780";Layout.fillWidth:true;wrapMode:Text.Wrap}
+        }
+        onAccepted:backend.deleteAssets(assetIds)
+    }
     UiDialog {id:noticeDialog;acceptText:"知道了";anchors.centerIn:parent;width:600;modal:true;title:"提示";standardButtons:Dialog.Ok
         ScrollView {width:parent.width;height:Math.min(300,noticeText.implicitHeight+10);clip:true
             Text {id:noticeText;width:noticeDialog.availableWidth;text:app.notice;wrapMode:Text.Wrap;font.pixelSize:13;color:"#3e4c53"}
@@ -361,7 +457,10 @@ ApplicationWindow {
     }
     UiDialog {id:newDirectory;objectName:"newDirectoryDialog";acceptText:"新建";anchors.centerIn:parent;width:410;modal:true;title:"新建子目录";standardButtons:Dialog.Ok|Dialog.Cancel
         property string parentPath:""
-        ColumnLayout {width:parent.width;spacing:12;Label {text:"创建位置："+newDirectory.parentPath;Layout.fillWidth:true;elide:Text.ElideMiddle} UiTextField {id:newName;objectName:"newDirectoryName";Accessible.name:"新建子目录名称";placeholderText:"目录名称";Layout.fillWidth:true;selectByMouse:true}}
+        ColumnLayout {width:parent.width;spacing:12;Label {text:"创建位置："+newDirectory.parentPath;Layout.fillWidth:true;elide:Text.ElideMiddle} UiTextField {
+            id:newName;objectName:"newDirectoryName";Accessible.name:"新建子目录名称";placeholderText:"目录名称";Layout.fillWidth:true;selectByMouse:true
+            onAccepted:if(newDirectory.opened&&!backend.busy&&text.trim().length>0)newDirectory.accept()
+        }}
         onOpened:{newName.clear();newName.forceActiveFocus()}
         onAccepted:backend.createDirectory(parentPath,newName.text)
     }
@@ -372,7 +471,7 @@ ApplicationWindow {
         onOpened:{renameName.text=currentName;renameName.forceActiveFocus();renameName.selectAll()}
         onAccepted:{editor.flushDraft();editor.stopPlayback();backend.renameDirectory(directoryPath,renameName.text)}
     }
-    UiDialog {id:historyDialog;objectName:"historyDialog";anchors.centerIn:parent;width:820;height:520;modal:true;title:"操作记录 · 最近 100 项";standardButtons:Dialog.Close
+    UiDialog {id:historyDialog;objectName:"historyDialog";anchors.centerIn:parent;width:820;height:520;modal:true;title:"操作记录 · 最近 100 项 · 本地时间";standardButtons:Dialog.Close
         ColumnLayout {anchors.fill:parent;spacing:12
         RowLayout {Layout.fillWidth:true;spacing:12
             Text {Layout.fillWidth:true;text:backend.busy?backend.status:backend.pending?"未完成操作会保留，供后续核对处理":"清空记录不会改动图片、视频或文件夹";font.pixelSize:12;color:"#69777e";elide:Text.ElideRight}
@@ -387,12 +486,12 @@ ApplicationWindow {
             ScrollBar.vertical:ScrollBar {}
             delegate:Rectangle {required property var modelData;width:ListView.view.width;height:105;color:"#f0f3f4";radius:5
                 ColumnLayout {anchors.fill:parent;anchors.margins:10;spacing:4
-                    Text {text:({move:"文件移动",copy:"文件复制",live_move:"Live 图成组移动",live_copy:"Live 图成组复制",mkdir:"创建目录",export:"保存裁剪子图",rename_directory:"目录重命名"}[modelData.kind]||modelData.kind)+" · "+({planned:"等待执行",running:"执行中",copied:"已复制，等待校验",target_ready:"目标文件已保存",source_removed:"原位置文件已移除",committed:"已完成",undone:"已撤销",abandoned:"已结束"}[modelData.state]||modelData.state)+" · "+modelData.created;font.pixelSize:11;color:"#3e4c53"}
+                    Text {objectName:"historyEntrySummary";text:({move:"文件移动",copy:"文件复制",live_move:"Live 图成组移动",live_copy:"Live 图成组复制",mkdir:"创建目录",export:"保存裁剪子图",replace_image:"裁剪覆盖原图",recycle:"裁剪后回收原文件",trash:"删除文件（回收站）",rename_directory:"目录重命名"}[modelData.kind]||modelData.kind)+" · "+({planned:"等待执行",running:"执行中",copied:"已复制，等待校验",target_ready:"目标文件已保存",source_removed:"原位置文件已移除",committed:"已完成",undone:"已撤销",abandoned:"已结束"}[modelData.state]||modelData.state)+" · "+(modelData.createdLocal||modelData.created);font.pixelSize:11;color:"#3e4c53"}
                     Text {text:modelData.source+" → "+modelData.target;Layout.fillWidth:true;elide:Text.ElideMiddle;font.pixelSize:11;color:"#667780"}
                     Text {text:modelData.error;visible:!!modelData.error;Layout.fillWidth:true;elide:Text.ElideRight;font.pixelSize:11;color:"#a36044"}
-                    RowLayout {spacing:8;UiButton {text:"打开目标目录";iconName:"folderOpen";implicitHeight:27;onClicked:backend.reveal(modelData.target)}
+                    RowLayout {spacing:8;UiButton {text:(modelData.kind==="recycle"||modelData.kind==="trash")?"打开原目录":"打开目标目录";iconName:"folderOpen";implicitHeight:27;onClicked:backend.reveal((modelData.kind==="recycle"||modelData.kind==="trash")?modelData.source:modelData.target)}
                         UiButton {text:"撤销移动";iconName:"undo";tone:"warning";hint:modelData.kind==="live_move"?"将 Live 图的照片和视频一起移回原位置":"将文件从目标目录移回原位置";implicitHeight:27;visible:(modelData.kind==="move"||modelData.kind==="live_move")&&modelData.state==="committed";enabled:!backend.busy;onClicked:{backend.undo(modelData.id);historyDialog.close()}}
-                        UiButton {text:"核对并继续";iconName:"forward";tone:"warning";hint:"核对文件后继续这项操作；若是移动，将在目标完整后移除原位置的文件";implicitHeight:27;visible:!["committed","undone","abandoned"].includes(modelData.state);enabled:!backend.busy;onClicked:{backend.recover(modelData.id);historyDialog.close()}}
+                        UiButton {text:"核对并继续";iconName:"forward";tone:"warning";hint:(modelData.kind==="recycle"||modelData.kind==="trash")?"核对尚未回收的原文件（裁剪后删除同时校验子图），再继续移入回收站":"核对文件后继续这项操作；若是移动，将在目标完整后移除原位置的文件";implicitHeight:27;visible:!["committed","undone","abandoned"].includes(modelData.state);enabled:!backend.busy;onClicked:{backend.recover(modelData.id);historyDialog.close()}}
                     }
                 }
             }

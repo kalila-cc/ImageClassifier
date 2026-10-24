@@ -5,7 +5,7 @@ Item {
     required property var gridView
     required property var records
     required property var selectedIds
-    property real cardGap: 10
+    property real cardGap: 0
     property var priorSelection: []
     property bool dragging: false
     property bool gestureCancelled: false
@@ -85,7 +85,7 @@ Item {
         y: Math.min(selectionArea.anchorY,selectionArea.endY)-selectionArea.gridView.contentY
         width: Math.abs(selectionArea.endX-selectionArea.anchorX)
         height: Math.abs(selectionArea.endY-selectionArea.anchorY)
-        color: "#263e8365";border.color:"#3e8365";border.width:1;radius:2
+        color: Theme.alpha(Theme.primary,.15);border.color:Theme.primary;border.width:1;radius:2
     }
     MouseArea {
         id: selectionMouse

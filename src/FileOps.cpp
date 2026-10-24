@@ -13,12 +13,23 @@
 #include <stdexcept>
 #include <memory>
 #include <vector>
+#include <algorithm>
 
 static void fail(const QString &message) { throw std::runtime_error(message.toUtf8().constData()); }
 static QString native(const QString &path) {
     QString p=QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
     if(p.startsWith("\\\\?\\")) return p;
     return p.startsWith("\\\\") ? "\\\\?\\UNC\\"+p.mid(2) : "\\\\?\\"+p;
+}
+static bool confirmedMissing(const QString &path) {
+    if(path.isEmpty())return false;
+    // A missing/disconnected parent cannot prove that its files are absent.
+    const auto parent=native(QFileInfo(path).absolutePath());
+    const auto parentAttributes=GetFileAttributesW(reinterpret_cast<LPCWSTR>(parent.utf16()));
+    if(parentAttributes==INVALID_FILE_ATTRIBUTES||!(parentAttributes&FILE_ATTRIBUTE_DIRECTORY))return false;
+    const auto p=native(path);
+    if(GetFileAttributesW(reinterpret_cast<LPCWSTR>(p.utf16()))!=INVALID_FILE_ATTRIBUTES)return false;
+    const auto error=GetLastError();return error==ERROR_FILE_NOT_FOUND||error==ERROR_PATH_NOT_FOUND;
 }
 class ReadGuard {
 public:
@@ -98,6 +109,9 @@ QString FileOps::finishDirectoryRename(const QVariantMap &record) {
         }
         for(const auto &v:store.rows("SELECT group_id,position,source,target FROM live_members")){
             const auto r=v.toMap();store.exec("UPDATE live_members SET source=?,target=? WHERE group_id=? AND position=?",{relocatedPath(r["source"].toString(),from,to),relocatedPath(r["target"].toString(),from,to),r["group_id"],r["position"]});
+        }
+        for(const auto &v:store.rows("SELECT operation,backup FROM image_replacements")){
+            const auto r=v.toMap();store.exec("UPDATE image_replacements SET backup=? WHERE operation=?",{relocatedPath(r["backup"].toString(),from,to),r["operation"]});
         }
         for(const auto &key:{"sources","session"}) {
             const auto value=store.value(key);if(value.isEmpty())continue;
@@ -244,7 +258,12 @@ QString FileOps::transfer(const QString &source,const QString &directory,qint64 
             targetGuard=std::make_unique<ReadGuard>(target,false);
         } else {
             const auto error=GetLastError();
-            if(!copyOnly && !forceCopy && error!=ERROR_NOT_SAME_DEVICE) fail("移动失败（目标重名、文件占用或权限不足），未覆盖目标");
+            if(!copyOnly && !forceCopy && error!=ERROR_NOT_SAME_DEVICE) {
+                if(error==ERROR_SHARING_VIOLATION||error==ERROR_LOCK_VIOLATION)fail("文件正被占用，未移动；请关闭播放或其他程序的文件预览后重试");
+                if(error==ERROR_ACCESS_DENIED)fail("没有移动权限或文件被保护，原文件保留；请检查来源和目标目录权限");
+                if(error==ERROR_FILE_EXISTS||error==ERROR_ALREADY_EXISTS)fail("目标已出现同名文件，未覆盖；请重试以分配新名称");
+                fail(QString("移动失败（系统错误 %1），原文件保留，未覆盖目标").arg(error));
+            }
             QFile in(source), out(temp);
             if(!in.open(QIODevice::ReadOnly) || !out.open(QIODevice::WriteOnly|QIODevice::NewOnly)) fail("无法建立复制临时文件");
             while(!in.atEnd()) {
@@ -269,13 +288,26 @@ QString FileOps::transfer(const QString &source,const QString &directory,qint64 
         return target;
     } catch(const std::exception &e) { store.exec("UPDATE operations SET error=? WHERE id=?",{QString::fromUtf8(e.what()),id}); throw; }
 }
-QString FileOps::writeImage(const QImage &image,const QString &directory,const QString &name,const QString &id,const QString &parent) {
+ImageExportResult FileOps::writeImage(const QImage &image,const QString &directory,const QString &name,const QString &requestId,const QString &parent) {
     if(image.isNull() || !QFileInfo(directory).isDir()) fail("图片为空或输出目录不存在");
-    const auto old=store.rows("SELECT * FROM operations WHERE id=?",{id});
+    // Keep completed history immutable. Repeating an export whose output was
+    // removed creates a new operation, and later retries reuse that latest one.
+    const auto prefix=requestId+"-repeat-";
+    const auto old=store.rows("SELECT * FROM operations WHERE kind='export' AND (id=? OR substr(id,1,?)=?) ORDER BY rowid DESC LIMIT 1",{requestId,prefix.size(),prefix});
+    QString id=requestId;
     if(!old.isEmpty()) {
         const auto r=old[0].toMap();
-        if(r["state"]=="committed" && QFileInfo::exists(r["target"].toString()) && hash(r["target"].toString())==r["sha"].toString()) return r["target"].toString();
-        fail("此输出存在未完成记录，请先核对操作日志");
+        if(r["state"]!="committed")fail("此裁剪输出尚未完成，请在操作记录中核对后继续");
+        const auto path=r["target"].toString(),p=native(path);
+        const auto attributes=GetFileAttributesW(reinterpret_cast<LPCWSTR>(p.utf16()));
+        const auto error=attributes==INVALID_FILE_ATTRIBUTES?GetLastError():ERROR_SUCCESS;
+        if(attributes!=INVALID_FILE_ATTRIBUTES) {
+            if(hash(path)==r["sha"].toString())return {path,r["id"].toString(),false};
+            fail("先前导出的子图已被修改，未覆盖该文件；请调整裁剪区域或目标目录后重新导出");
+        }
+        if(error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND)
+            fail("暂时无法读取先前导出的子图，请检查目录权限或磁盘连接后重试");
+        id=prefix+QUuid::createUuid().toString(QUuid::WithoutBraces);
     }
     const auto target=uniquePath(directory,name), temp=QDir(directory).filePath(".imageclassifier-"+id+".part");
     store.exec("INSERT INTO operations(id,kind,source,target,temp,state,parent) VALUES(?,'export','',?,?,'planned',?)",{id,target,temp,parent});
@@ -292,8 +324,137 @@ QString FileOps::writeImage(const QImage &image,const QString &directory,const Q
         phase(id,"target_ready");
         ReadGuard targetGuard(target,false);
         if(hash(target)!=outputSha)fail("正式输出校验失败，原图应保留，请核对操作记录");
-        phase(id,"committed"); return target;
+        phase(id,"committed"); return {target,id,true};
     } catch(const std::exception &e) { store.exec("UPDATE operations SET error=? WHERE id=?",{QString::fromUtf8(e.what()),id}); throw; }
+}
+ImageExportResult FileOps::replaceImage(const QImage &image,const QString &path,const FileStamp &expected,const QString &parent) {
+    if(image.isNull()||expected.sha.isEmpty())fail("缺少可校验的裁剪图片或原图信息");
+    const auto before=stamp(path,true);
+    if(before.sha!=expected.sha||before.identity!=expected.identity||before.size!=expected.size||before.mtime!=expected.mtime)fail("原图已变化，未覆盖");
+    const auto id=QUuid::createUuid().toString(QUuid::WithoutBraces),directory=QFileInfo(path).absolutePath();
+    const auto temp=directory+"/.imageclassifier-"+id+".part";
+    const auto backup=directory+"/.imageclassifier-"+id+"-original."+QFileInfo(path).suffix();
+    store.exec("BEGIN IMMEDIATE");
+    try {
+        store.exec("INSERT INTO operations(id,kind,source,target,temp,size,mtime,identity,state,parent) VALUES(?,'replace_image',?,?,?,?,?,?,'planned',?)",{id,path,path,temp,before.size,before.mtime,before.identity,parent});
+        store.exec("INSERT INTO image_replacements(operation,source_sha,backup) VALUES(?,?,?)",{id,before.sha,backup});
+        store.exec("COMMIT");
+    }catch(...){store.exec("ROLLBACK");throw;}
+    try {
+        phase(id,"running");
+        QFile file(temp);if(!file.open(QIODevice::WriteOnly|QIODevice::NewOnly))fail("无法创建裁剪临时文件，原图保留");
+        QImageWriter writer(&file,QFileInfo(path).suffix().toLower().toLatin1());writer.setQuality(95);
+        if(!writer.write(image)||!file.flush())fail("裁剪保存失败，原图保留："+writer.errorString());
+        file.close();
+        if(Media::read(temp).size()!=image.size())fail("裁剪文件解码校验失败，原图保留");
+        store.exec("UPDATE operations SET sha=? WHERE id=?",{hash(temp),id});phase(id,"copied");
+        return finishImageReplacement(id);
+    }catch(const std::exception &e){store.exec("UPDATE operations SET error=? WHERE id=?",{QString::fromUtf8(e.what()),id});throw;}
+}
+ImageExportResult FileOps::finishImageReplacement(const QString &id) {
+    const auto rows=store.rows("SELECT o.*,r.source_sha,r.backup FROM operations o JOIN image_replacements r ON r.operation=o.id WHERE o.id=?",{id});
+    if(rows.isEmpty())fail("缺少覆盖记录");const auto r=rows[0].toMap();
+    const auto path=r["source"].toString(),temp=r["temp"].toString(),backup=r["backup"].toString(),sha=r["sha"].toString();
+    if(r["state"]=="committed")return {path,id,false,{}};
+    try {
+        if(sha.isEmpty()||!QFileInfo::exists(path)||hash(path)!=sha){
+            ReadGuard original(path);const auto current=stamp(path,true);
+            if(current.sha!=r["source_sha"]||current.identity!=r["identity"]||current.size!=r["size"].toLongLong()||current.mtime!=r["mtime"].toLongLong())fail("原图已变化，拒绝覆盖；请核对操作记录");
+            if(sha.isEmpty()){phase(id,"abandoned");return {path,id,false,"临时输出未完成，原图保留，请重新裁剪"};}
+            if(!confirmedMissing(backup)||!QFileInfo::exists(temp)||hash(temp)!=sha)fail("临时输出或备份状态不符，原图保留");
+            const auto a=native(path),b=native(temp),c=native(backup);
+            if(!ReplaceFileW(reinterpret_cast<LPCWSTR>(a.utf16()),reinterpret_cast<LPCWSTR>(b.utf16()),reinterpret_cast<LPCWSTR>(c.utf16()),0,nullptr,nullptr))
+                fail(QString("覆盖未完成（系统错误 %1），请关闭其他程序的文件预览后在操作记录中核对").arg(GetLastError()));
+            phase(id,"target_ready");
+        }
+        ReadGuard output(path,false);
+        if(hash(path)!=sha)fail("覆盖结果校验失败，请保留文件并核对记录");
+        if(!QFileInfo::exists(backup)||hash(backup)!=r["source_sha"])fail("旧图备份校验失败，未清理任何文件");
+        // Persist cleanup together with completion: a crash must never leave
+        // an untracked backup after replacing the user's original.
+        const auto cleanup=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const auto old=stamp(backup,true);
+        store.exec("BEGIN IMMEDIATE");
+        try {
+            store.exec("INSERT INTO operations(id,kind,source,target,state,parent) VALUES(?,'recycle',?,'回收站','planned',?)",{cleanup,backup,id});
+            store.exec("INSERT INTO recycle_members(group_id,position,source,sha,size,mtime,identity) VALUES(?,0,?,?,?,?,?)",{cleanup,backup,old.sha,old.size,old.mtime,old.identity});
+            store.exec("INSERT INTO recycle_outputs(group_id,operation) VALUES(?,?)",{cleanup,id});
+            store.exec("UPDATE operations SET state='committed',error='' WHERE id=?",{id});
+            store.exec("COMMIT");
+        }catch(...){store.exec("ROLLBACK");throw;}
+        if(checkpoint)checkpoint("committed");
+        QString warning;
+        try {
+            finishRecycle(cleanup);
+        }catch(const std::exception &e){warning="图片已覆盖，旧图备份回收未完成："+QString::fromUtf8(e.what());}
+        return {path,id,true,warning};
+    }catch(const std::exception &e){store.exec("UPDATE operations SET error=? WHERE id=?",{QString::fromUtf8(e.what()),id});throw;}
+}
+QString FileOps::recycleAfterExport(const QVariantList &members,const QStringList &outputs,const QString &parent) {
+    if(outputs.isEmpty())fail("没有可核对的裁剪输出");
+    return planRecycle(members,outputs,parent,true);
+}
+QString FileOps::recycle(const QVariantList &members,const QString &parent) {
+    return planRecycle(members,{},parent,false);
+}
+QString FileOps::planRecycle(const QVariantList &members,const QStringList &outputs,const QString &parent,bool afterExport) {
+    if(members.isEmpty())fail("没有可核对的原文件");
+    const auto id=QUuid::createUuid().toString(QUuid::WithoutBraces);
+    store.exec("BEGIN IMMEDIATE");
+    try {
+        store.exec("INSERT INTO operations(id,kind,source,target,state,parent) VALUES(?,?,?,'回收站','planned',?)",{id,afterExport?"recycle":"trash",members[0].toMap()["path"],parent});
+        int position=0;
+        for(const auto &v:members){const auto m=v.toMap();
+            if(m["sha"].toString().isEmpty()||m["identity"].toString().isEmpty())fail("原文件校验信息不完整");
+            store.exec("INSERT INTO recycle_members(group_id,position,source,sha,size,mtime,identity) VALUES(?,?,?,?,?,?,?)",{id,position++,m["path"],m["sha"],m["size"],m["mtime"],m["identity"]});
+        }
+        for(const auto &output:outputs)store.exec("INSERT INTO recycle_outputs(group_id,operation) VALUES(?,?)",{id,output});
+        store.exec("COMMIT");
+    }catch(...){store.exec("ROLLBACK");throw;}
+    return finishRecycle(id);
+}
+QString FileOps::finishRecycle(const QString &id,bool recovering) {
+    const auto group=store.rows("SELECT * FROM operations WHERE id=? AND kind IN ('recycle','trash')",{id});
+    if(group.isEmpty())fail("回收记录不存在");
+    const auto source=group[0].toMap()["source"].toString();
+    if(group[0].toMap()["state"]=="committed")return source;
+    try {
+        const auto members=store.rows("SELECT * FROM recycle_members WHERE group_id=? ORDER BY position",{id});
+        if(members.isEmpty())fail("回收计划为空");
+        // A crash between the OS operation and its journal write is ambiguous.
+        // Explicit recovery closes that plan without deleting any remaining files.
+        if(recovering)for(const auto &v:members){const auto m=v.toMap();
+            if(m["state"]!="recycled"&&!QFileInfo::exists(m["source"].toString())) {
+                store.exec("UPDATE operations SET state='abandoned',error=? WHERE id=?",{"原文件缺失，无法确认回收结果；已停止剩余回收，请手动核对回收站和原目录",id});
+                return source;
+            }
+        }
+        std::vector<std::unique_ptr<ReadGuard>> guards;
+        const auto outputs=store.rows("SELECT o.* FROM operations o JOIN recycle_outputs r ON r.operation=o.id WHERE r.group_id=?",{id});
+        if((group[0].toMap()["kind"]=="recycle"&&outputs.isEmpty())||outputs.size()!=store.rows("SELECT operation FROM recycle_outputs WHERE group_id=?",{id}).size())fail("缺少裁剪输出记录，原文件保留");
+        for(const auto &v:outputs){const auto out=v.toMap();const auto path=out["target"].toString();
+            guards.push_back(std::make_unique<ReadGuard>(path,false));
+            if((out["kind"]!="export"&&out["kind"]!="replace_image")||out["state"]!="committed"||hash(path)!=out["sha"].toString())fail("子图缺失或已变化，停止回收原文件");
+        }
+        // Preflight ALL Live members before recycling either one, and keep the
+        // originals protected against writes throughout the operation.
+        for(const auto &v:members){const auto m=v.toMap();if(m["state"]=="recycled")continue;
+            const auto path=m["source"].toString();guards.push_back(std::make_unique<ReadGuard>(path));
+            const auto st=stamp(path,true);
+            if(st.sha!=m["sha"]||st.identity!=m["identity"]||st.size!=m["size"].toLongLong()||st.mtime!=m["mtime"].toLongLong())fail("原文件已变化，停止回收，请刷新后核对");
+        }
+        phase(id,"running");
+        for(const auto &v:members){const auto m=v.toMap();if(m["state"]=="recycled")continue;
+            const auto path=m["source"].toString();QString trash;
+            store.exec("UPDATE recycle_members SET state='recycling' WHERE group_id=? AND position=?",{id,m["position"]});
+            // QFile uses Windows' recycle-only operation. Never fall back to remove().
+            const bool ok=trashFile?trashFile(path,&trash):QFile::moveToTrash(path,&trash);
+            if(!ok||QFileInfo::exists(path))fail("无法将文件移入回收站；请在操作记录中核对后重试");
+            store.exec("UPDATE recycle_members SET state='recycled',trash=? WHERE group_id=? AND position=?",{trash,id,m["position"]});
+            if(checkpoint)checkpoint("recycled_member");
+        }
+        phase(id,"committed");return source;
+    }catch(const std::exception &e){store.exec("UPDATE operations SET error=? WHERE id=?",{QString::fromUtf8(e.what()),id});throw;}
 }
 QVariantList FileOps::reconcile() {
     for(const auto &v:store.rows("SELECT * FROM operations WHERE kind='rename_directory' AND state NOT IN ('committed','undone','abandoned') ORDER BY created")) {
@@ -304,7 +465,26 @@ QVariantList FileOps::reconcile() {
     auto pending=store.rows("SELECT * FROM operations WHERE state NOT IN ('committed','undone','abandoned') ORDER BY created");
     for(const auto &v:pending) {
         auto r=v.toMap(); const auto src=r["source"].toString(), dst=r["target"].toString();
-        if(r["kind"]=="rename_directory"||r["kind"]=="live_move"||r["kind"]=="live_copy")continue;
+        if(r["kind"]=="recycle"||r["kind"]=="trash") {
+            const auto members=store.rows("SELECT state FROM recycle_members WHERE group_id=?",{r["id"]});
+            if(!members.isEmpty()&&std::all_of(members.begin(),members.end(),[](const QVariant &m){return m.toMap()["state"]=="recycled";}))phase(r["id"].toString(),"committed");
+            continue; // Startup never resumes deletion automatically.
+        }
+        if(r["kind"]=="replace_image"||r["kind"]=="rename_directory"||r["kind"]=="live_move"||r["kind"]=="live_copy")continue;
+        // An untouched top-level transfer need not block every later action.
+        // Require positive evidence: no destination or temp, original identity,
+        // version and bytes intact. Partial transfers and Live groups stay pending.
+        if((r["kind"]=="move"||r["kind"]=="copy")&&r["parent"].toString().isEmpty()&&
+           (r["state"]=="planned"||r["state"]=="running")&&confirmedMissing(dst)&&confirmedMissing(r["temp"].toString())) {
+            try {
+                ReadGuard guard(src,false);const auto current=stamp(src,true);
+                if(current.identity==r["identity"].toString()&&current.sha==r["sha"].toString()&&
+                   current.size==r["size"].toLongLong()&&current.mtime==r["mtime"].toLongLong()) {
+                    store.exec("UPDATE operations SET state='abandoned',error=? WHERE id=?",{r["error"].toString()+"；已核对文件未移动、未产生副本，可重新操作",r["id"]});
+                    continue;
+                }
+            }catch(...){} // Unavailable or changed files are never assumed safe.
+        }
         bool targetOk=false;
         try { targetOk=QFileInfo::exists(dst) && !r["sha"].toString().isEmpty() && hash(dst)==r["sha"].toString(); } catch(...) {}
         // Recovery never deletes a remaining source automatically.
@@ -334,11 +514,14 @@ QString FileOps::undo(const QString &id) {
     return result;
 }
 QString FileOps::recover(const QString &id) {
+    const auto replacement=store.rows("SELECT id FROM operations WHERE id=? AND kind='replace_image'",{id});
+    if(!replacement.isEmpty())return finishImageReplacement(id).path;
     const auto rows=store.rows("SELECT * FROM operations WHERE id=?",{id});
     if(rows.isEmpty())fail("记录不存在");
     auto r=rows[0].toMap();const auto source=r["source"].toString(),target=r["target"].toString(),temp=r["temp"].toString(),sha=r["sha"].toString();
     if(r["state"]=="committed")return target;
     if(r["state"]=="undone"||r["state"]=="abandoned")fail("此记录已结束");
+    if(r["kind"]=="recycle"||r["kind"]=="trash")return finishRecycle(id,true);
     if(r["kind"]=="rename_directory")return finishDirectoryRename(r);
     if(r["kind"]=="live_move"||r["kind"]=="live_copy")return finishLive(id);
     if(r["kind"]=="mkdir") {

@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Window
 Rectangle {
     id: card
     property string photo: ""
@@ -15,6 +16,16 @@ Rectangle {
     }
     property bool selected: false
     property bool focused: false
+    function pulse() { browsePulse.restart(); }
+    function resetPulse() { browsePulse.stop();scale=1; }
+    onVisibleChanged:if(!visible)resetPulse()
+    onAssetChanged:resetPulse()
+    z: browsePulse.running ? 2 : selected ? 1 : 0
+    SequentialAnimation {
+        id:browsePulse
+        NumberAnimation {target:card;property:"scale";from:1;to:1.10;duration:350;easing.type:Easing.OutCubic}
+        NumberAnimation {target:card;property:"scale";to:1;duration:550;easing.type:Easing.InOutCubic}
+    }
     property bool externalHovered: false
     property bool externalPressed: false
     readonly property bool isHovered: enabled && (externalHovered || hovered.containsMouse)
@@ -22,14 +33,16 @@ Rectangle {
     signal clicked()
     signal opened()
     signal playRequested()
-    radius: 8; color: isPressed ? "#c9ded9" : isHovered ? (selected ? "#d5e9e3" : "#f5f8f9") : selected ? "#e0eeeb" : "#ffffff"
-    border.color: selected ? "#16756a" : isHovered ? "#a9b8bd" : "#dce2e4"
-    border.width: selected ? 2 : 1
+    color: "#eef2f4"
+    Accessible.role:Accessible.CheckBox
+    Accessible.name:filename
+    Accessible.checked:selected
     Image {
-        id: thumb; objectName:"cardThumbnail"; x: 5; y: 5
-        width: parent.width - 10; height: parent.height - 45
+        id: thumb; objectName:"cardThumbnail"; anchors.fill:parent
         source: card.photo.startsWith("image://media/") ? card.photo + "/cover" : card.photo
-        sourceSize: Qt.size(600, Math.max(1, Math.round(600 * height / Math.max(1, width))))
+        // Two cache sizes keep enlarged tiles sharp without a cache entry per slider position.
+        readonly property int resolution:card.width*Screen.devicePixelRatio>600?1024:600
+        sourceSize: Qt.size(resolution,resolution)
         property string completedSource:""
         property bool loadingHint:false
         retainWhileLoading:completedSource!==""&&source.toString()===completedSource
@@ -43,6 +56,7 @@ Rectangle {
     }
     Rectangle {
         anchors.fill: thumb
+        clip: true
         visible: thumb.status !== Image.Ready && !(thumb.status===Image.Loading&&thumb.retainWhileLoading)
         color: "#eef2f4"
         Column {
@@ -59,17 +73,30 @@ Rectangle {
         }
     }
     Rectangle {
-        x: 13; y: 13; width: 19; height: 19; radius: 5
-        color: card.selected ? "#16756a" : "#e6ffffff"; border.color: card.selected ? "#16756a" : "#c5d0d4"
-        Glyph { anchors.centerIn: parent; width: 14; height: 14; name: "check"; ink: "white"; visible: card.selected }
+        anchors.fill:thumb;z:3
+        color:card.isPressed?"#25000000":card.selected?Theme.alpha(Theme.primary,.08):card.isHovered?"#14ffffff":"transparent"
+    }
+    Rectangle {
+        objectName:"cardSelectionOutline";anchors.fill:parent;z:3
+        // Center the stroke on the tile edge so adjacent selections share one line.
+        anchors.margins:card.selected?-2.5:0
+        color:"transparent"
+        border.width:card.selected?5:card.isHovered?1:0
+        border.color:card.selected?"#ffffff":"#b3ffffff"
+    }
+    Rectangle {
+        objectName:"cardSelectionBadge";z:4
+        x: 13; y: 13; width: 25; height: 25; radius: width / 2
+        color: card.selected ? Theme.checkFill : "#e6ffffff"
+        border.width: card.selected ? 1.5 : 1
+        border.color: card.selected ? "#ffffff" : "#c5d0d4"
+        Glyph { objectName:"cardSelectionCheck";anchors.centerIn: parent; width: 18; height: 18; name: "check"; strokeWidth:3.5;ink:"white";visible:card.selected }
     }
     Rectangle {
         visible: card.kind !== "" && !card.asset.isLive; anchors.right: parent.right; anchors.rightMargin: 12; y: 12
         width: badge.implicitWidth + 14; height: 22; radius: 4; color: "#ce202629"
         Text { id: badge; anchors.centerIn: parent; text: card.kind; font.pixelSize: 10; color: "white"; font.weight: Font.DemiBold }
     }
-    Text { x: 12; anchors.bottom: parent.bottom; anchors.bottomMargin: 13; width: parent.width - 38; elide: Text.ElideRight; text: card.filename; font.pixelSize: 12; font.weight: card.selected ? Font.DemiBold : Font.Normal; color: card.selected ? "#11695f" : "#45545b" }
-    Rectangle { visible: card.focused; width: 5; height: 5; radius: 3; color: "#16756a"; anchors.right: parent.right; anchors.rightMargin: 13; anchors.bottom: parent.bottom; anchors.bottomMargin: 18 }
     MouseArea { id: hovered; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: card.clicked(); onDoubleClicked: card.opened() }
     UiButton {
         id:videoPlay;objectName:"cardVideoPlayButton";z:2
@@ -81,7 +108,7 @@ Rectangle {
         onClicked:card.playRequested()
     }
     LivePhotoPreview {
-        id: livePreview; objectName: "cardLivePreview"; z: 2; anchors.fill: thumb
+        id: livePreview; objectName: "cardLivePreview"; z: 2; anchors.fill: thumb; clip: true
         asset: card.asset; available: card.liveAvailable; compact: true; ownerKey: "batch:"+(card.asset.id||"")
     }
     ToolTip.visible: card.isHovered && !card.isPressed && card.filename.length > 0

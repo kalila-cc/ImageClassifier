@@ -33,13 +33,16 @@ ImageClassifier/
 | --- | --- | --- |
 | 启动与进程 | [main.cpp](src/main.cpp)、[AppRestart](src/AppRestart.h) | 数据目录、单实例锁、QML 引擎和图片提供器；重启前保存状态，通过进程握手交接数据锁 |
 | 工作区界面 | [Application.qml](ui/Application.qml) | 批量网格、选择、筛选、模式切换和弹窗协调；资产 ID 关联卡片与大图 |
+| 主题与配色 | [Theme.qml](ui/Theme.qml)、[ThemeSettings.qml](ui/ThemeSettings.qml)、[ThemeColorField.qml](ui/ThemeColorField.qml) | `qmldir` 注册引擎级单例，统一主题色、深浅状态和对比度；Backend 验证并持久化颜色组合。`ThemeHeader.qml` 统一工作区及设置页顶栏；渐变应用于顶栏、较大的按钮和选中背景；`ThemedIcon.qml` 通过图片提供器为原 SVG 换色 |
+| 操作反馈 | [OperationToast.qml](ui/OperationToast.qml) | 接收 Backend 的结构化操作结果，区分成功、失败和部分完成；管理提示队列、一次性图标动画、自动收起和详情入口，不从状态文案猜测结果 |
 | 功能界面 | [ImageEditor.qml](ui/ImageEditor.qml)、[DirectoryTree.qml](ui/DirectoryTree.qml)、[SettingsPage.qml](ui/SettingsPage.qml)、[SourcesDialog.qml](ui/SourcesDialog.qml) | 编辑、目录交互、设置和来源管理；基础控件使用 `Ui*.qml`，图标使用 `Glyph.qml` 和 SVG |
 | 应用服务 | [Backend](src/Backend.h) | 通过 `Q_PROPERTY` 暴露状态、`Q_INVOKABLE` 接收命令；协调扫描、批次、文件操作、草稿和历史 |
 | 媒体与时间 | [Media](src/Media.h)、[MediaTime.cpp](src/MediaTime.cpp) | 扫描、解码、拍摄时间排序、批次边界相似判断和输出时间继承 |
 | 预览与封面 | [ImageProvider](src/ImageProvider.h)、[ThumbnailCache](src/ThumbnailCache.h) | 通过 `image://media/` 异步供应图片和视频封面；图片中心缩略图使用内存及磁盘缓存，视频代表帧使用有容量上限的内存缓存 |
 | Live 与 HEIC | [LivePhoto](src/LivePhoto.h)、[AppleLivePhoto.cpp](src/AppleLivePhoto.cpp)、[HeifImage](src/HeifImage.h) | 单文件实况识别、iPhone 成员配对、HEIC 解码、播放副本准备；界面复用 `LivePhotoPreview.qml` |
 | 裁剪几何 | [CropGeometry](src/CropGeometry.h)、[RotatingPreview.qml](ui/RotatingPreview.qml) | 旋转坐标、比例及图像边界约束；预览和导出使用一致几何规则 |
-| 图片视口 | [PhotoViewport.qml](ui/PhotoViewport.qml) | 适合窗口／铺满切换、鼠标定位缩放和拖动平移；视口坐标与裁剪参数分离 |
+| 图片视口 | [PhotoViewport.qml](ui/PhotoViewport.qml)、[PhotoSwipeArea.qml](ui/PhotoSwipeArea.qml) | 适合窗口／铺满切换、鼠标定位缩放和拖动平移；非裁剪适合窗口时识别横向拖拽，松手发出前后导航，保护双击及缩放手势；视口坐标与裁剪参数分离 |
+| 相邻图预载 | [NeighborPreload.qml](ui/NeighborPreload.qml) | 当前大图就绪后预载前后各一张静态预览，通过 Qt 图片缓存复用解码；离开大图释放引用，滑动过渡由 `RotatingPreview.qml` 保留旧纹理并协调新旧图位置 |
 | 文件操作 | [FileOps](src/FileOps.h) | 移动、复制、子图写入、目录重命名、冲突处理、内容校验、撤销和恢复 |
 | 存储 | [Store](src/Store.h) | SQLite 连接、建表、参数化查询及键值设置 |
 | 智能裁剪 | [SmartCrop](src/SmartCrop.h)、[worker.py](tools/ai/worker.py) | 模型进程管理、过期建议丢弃、近期样本管理、个人裁剪偏好更新 |
@@ -57,7 +60,7 @@ CMake 将业务模块编译为 `classifier_core` 静态库；`ImageClassifier` �
 
 **移动与复制：** 选择资产及目标 → 核对当前文件版本 → `FileOps` 持久化操作计划 → 执行并校验 → 更新列表、目录数量和历史。跨卷移动先写临时文件、校验并提交目标，再核对来源并移除；重名使用新文件名，不覆盖已有文件。iPhone Live 的照片和视频作为一组记录及处理。
 
-**裁剪与学习：** 加载方向纠正后的图片及草稿 → 手动调整或接收智能建议 → `CropGeometry` 约束旋转后的有效区域 → 校验全部子图参数 → 输出 PNG 并继承拍摄时间 → 校验输出和原图 → 保存学习记录。仅裁剪将子图放在原目录并加入当前列表；裁剪并归类使用各子图目标。两种操作均保留原图。固定输出编号用于重复操作校验，部分输出失败时保留记录供核对。
+**裁剪与学习：** 加载方向纠正后的图片及草稿 → 调整或接收智能建议 → `CropGeometry` 约束有效区域 → 校验全部参数 → 保存并继承拍摄时间 → 校验输出 → 记录学习样本。所有裁剪结果留在原目录；仅裁剪保留原图，单子图覆盖保持可写原格式，多子图全部保存后可回收原图。`FileOps::replaceImage` 先写临时图，再通过 `ReplaceFileW` 保留旧原件备份并替换，覆盖完成和备份回收计划在同一数据库事务提交。无法原格式写回时转为 PNG；Live 转为静态图并回收旧成员。输出使用新素材编号更新预览和焦点，未完成覆盖或回收仅由用户手动核对。独立输出的固定请求编号用于幂等校验，部分失败保留记录。
 
 **播放：** 普通视频先显示代表帧，点击播放后启用播放器；Live 默认显示静态封面，主动播放时准备视频源并循环。两者默认静音，离开当前媒体时停止播放。Live 服务用请求代次隔离过期结果，避免切图后播放错误媒体。
 
@@ -72,6 +75,8 @@ CMake 将业务模块编译为 `classifier_core` 静态库；`ImageClassifier` �
 | `drafts` | 关联资产和文件版本的 JSON 裁剪草稿 |
 | `operations` | 文件操作意图、阶段、校验值、错误及父操作关联 |
 | `live_members` | Live 组级操作的成员计划和校验信息 |
+| `recycle_members` / `recycle_outputs` | 直接删除与裁剪后回收的文件成员、校验信息、回收位置、阶段及裁剪关联输出编号 |
+| `image_replacements` | 原位覆盖的原文件哈希及旧原件备份路径，与操作日志共同支持校验和显式恢复 |
 | `live_metadata` | 可重建的 Live 关联标识缓存 |
 | `cleared_history` | 已从操作记录界面清空的操作编号 |
 

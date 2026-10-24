@@ -30,7 +30,7 @@ MenuItem {
     }
     background: Rectangle {
         radius: 5
-        color: entry.enabled && entry.down ? "#c9ded9" : entry.enabled && entry.highlighted ? "#e0eeeb" : "transparent"
+        color: entry.enabled && entry.down ? Theme.softPressed : entry.enabled && entry.highlighted ? Theme.soft : "transparent"
     }
     MouseArea {anchors.fill: parent; acceptedButtons: Qt.NoButton; cursorShape: entry.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor}
 }

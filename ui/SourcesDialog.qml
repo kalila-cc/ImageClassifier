@@ -141,7 +141,7 @@ UiDialog {
                                 RowLayout {
                                     Layout.fillWidth: true; spacing: 8
                                     Text { text: dialog.directoryName(modelData); Layout.fillWidth: true; elide: Text.ElideRight; color: "#34444c"; font.pixelSize: 13; font.weight: Font.DemiBold }
-                                    Text { text: dialog.isExisting(modelData) ? "已添加" : "待添加"; font.pixelSize: 11; color: dialog.isExisting(modelData) ? "#829097" : "#16756a" }
+                                    Text { text: dialog.isExisting(modelData) ? "已添加" : "待添加"; font.pixelSize: 11; color: dialog.isExisting(modelData) ? "#829097" : Theme.primary }
                                 }
                                 Text {
                                     text: modelData.replace(/\//g, "\\"); Layout.fillWidth: true; elide: Text.ElideMiddle
@@ -187,9 +187,9 @@ UiDialog {
                         placeholderText: "例如 D:\\照片\\相机\n或粘贴资源管理器中复制的目录路径"
                         selectByMouse: true; wrapMode: TextEdit.Wrap; font.pixelSize: 12; padding: 10
                         color: "#34444c"; placeholderTextColor: "#89959a"
-                        selectionColor: "#d0e7e1"; selectedTextColor: "#115f56"
+                        selectionColor: Theme.softHover; selectedTextColor: Theme.ink
                         enabled: !dialog.submitting && !backend.busy
-                        background: Rectangle { color: "white"; radius: 6; border.width: sourcePaths.activeFocus ? 2 : 1; border.color: sourcePaths.activeFocus ? "#16756a" : "#dce2e4" }
+                        background: Rectangle { color: "white"; radius: 6; border.width: sourcePaths.activeFocus ? 2 : 1; border.color: sourcePaths.activeFocus ? Theme.primary : "#dce2e4" }
                     }
                 }
                 RowLayout {
@@ -202,7 +202,7 @@ UiDialog {
                 objectName: "sourceFeedback"
                 visible: dialog.feedback.length > 0; Layout.fillWidth: true
                 text: dialog.feedback; wrapMode: Text.Wrap; maximumLineCount: 3; elide: Text.ElideRight
-                font.pixelSize: 12; lineHeight: 1.3; color: dialog.feedbackError ? "#a33636" : "#16756a"
+                font.pixelSize: 12; lineHeight: 1.3; color: dialog.feedbackError ? "#a33636" : Theme.primary
                 Accessible.role: Accessible.AlertMessage; Accessible.name: text
                 ToolTip.visible: feedbackHover.hovered; ToolTip.text: text; ToolTip.delay: 500
                 HoverHandler { id: feedbackHover }

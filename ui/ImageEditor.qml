@@ -24,6 +24,7 @@ ColumnLayout {
     property string loadedId:""
     property string loadedVersion:""
     property bool activeView:false
+    property url videoSource:""
     property bool touched:false
     property bool smartApplied:false
     property string suggestionToken:""
@@ -42,6 +43,7 @@ ColumnLayout {
     signal next()
     signal imageRequested(string assetId)
     signal notice(string message)
+    signal exportRejected(string message)
     function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2)}
     function spec(){return {id:selectedDraft>=0&&drafts[selectedDraft]?drafts[selectedDraft].id:uid(),x:cropX,y:cropY,w:cropW,h:cropH,angle:angle,ratio:ratio,touched:touched,smartApplied:smartApplied,target:selectedDraft>=0&&drafts[selectedDraft]?drafts[selectedDraft].target:targetFolder}}
     function invalidateSuggestion(){suggestTimer.stop();suggestionToken=""}
@@ -64,10 +66,10 @@ ColumnLayout {
     function flushDraft(){if(!loadedId||isVideo)return true;if(loadingDraft)return false;saveTimer.stop();capture();return backend.saveDraft(loadedId,drafts)}
     function enterEditing(){canvas.resetZoom()}
     function toggleZoomFrom(item,x,y){const p=item.mapToItem(canvas,x,y);canvas.toggleZoomAt(p.x,p.y)}
-    function playVideo(){if(activeView&&isVideo)player.play()}
+    function playVideo(){if(activeView&&isVideo&&!backend.busy){videoSource=asset.url||"";player.play()}}
     function toggleVideoPlayback(){
         if(!activeView||!isVideo||backend.busy)return;
-        if(player.playbackState===MediaPlayer.PlayingState)player.pause();else player.play();
+        if(player.playbackState===MediaPlayer.PlayingState)player.pause();else playVideo();
     }
     function setCropMode(enabled){stopPlayback();flushDraft();backend.cropMode=enabled}
     function loadCurrent(){
@@ -78,7 +80,7 @@ ColumnLayout {
         // All edits are saved on change; never apply a new asset's values to an old draft.
         if(loadedId && loadedId!==(asset.id||"") && drafts.length && !loadingDraft) backend.saveDraft(loadedId,drafts);
         saveTimer.stop();
-        player.stop();videoSound.muted=true;loadingDraft=true;loadedId=asset.id||"";loadedVersion=stamp;selectedDraft=-1;zoom=1;
+        stopPlayback();loadingDraft=true;loadedId=asset.id||"";loadedVersion=stamp;selectedDraft=-1;zoom=1;
         // Read the incoming type directly: the isVideo binding may update after onAssetChanged.
         dimensions=loadedId&&!video?backend.imageDimensions(loadedId):{};
         drafts=loadedId&&!video?backend.loadDraft(loadedId):[];
@@ -108,8 +110,8 @@ ColumnLayout {
     function setRatio(value){
         manualEdit();ratio=value;applyCrop(spec());
     }
-    function exportDrafts(onlyCrop){invalidateSuggestion();flushDraft();if(drafts.length===0){notice("至少保留一个裁剪区域");return}backend.exportCrops(loadedId,drafts,!!onlyCrop)}
-    function stopPlayback(){player.stop();videoSound.muted=true;backend.livePhoto.stop()}
+    function exportDrafts(onlyCrop,recycleOriginal,replaceOriginal){invalidateSuggestion();if(!flushDraft()){exportRejected("裁剪草稿未能保存，请检查数据目录后重试");return}if(drafts.length===0){exportRejected("至少保留一个裁剪区域");return}backend.exportCrops(loadedId,drafts,!!onlyCrop,!!recycleOriginal,!!replaceOriginal)}
+    function stopPlayback(){player.stop();videoSource="";videoSound.muted=true;backend.livePhoto.stop()}
     function addDraft(){capture();let d=spec();d.id=uid();d.target=targetFolder;drafts=drafts.concat([d]);selectDraft(drafts.length-1);flushDraft()}
     function removeSelectedDraft(){
         if(drafts.length<=1||selectedDraft<0)return;
@@ -129,7 +131,7 @@ ColumnLayout {
     onCropActiveChanged:{if(cropActive)queueSuggestion(false);else {invalidateSuggestion();smartMessage=""}}
     Connections {
         target:backend
-        function onChanged(){if(backend.busy)editor.invalidateSuggestion();else editor.queueSuggestion(false)}
+        function onChanged(){if(backend.busy){editor.invalidateSuggestion();editor.stopPlayback()}else editor.queueSuggestion(false)}
     }
     Connections {
         target:backend.smartCrop
@@ -141,6 +143,12 @@ ColumnLayout {
     }
     Timer {id:suggestTimer;interval:150;onTriggered:editor.requestSuggestion()}
     Timer {id:saveTimer;interval:400;onTriggered:editor.flushDraft()}
+    NeighborPreload {
+        objectName:"neighborPreload"
+        active:editor.activeView&&!editor.isVideo
+        settled:editor.previewReady&&!preview.slideRunning&&!backend.busy
+        records:editor.navigationItems;currentId:editor.asset.id||""
+    }
     Component.onDestruction:flushDraft()
     RowLayout {
         Layout.fillWidth:true;Layout.preferredHeight:52;Layout.leftMargin:14;Layout.rightMargin:14;spacing:8
@@ -148,9 +156,6 @@ ColumnLayout {
         Text {text:(editor.total?editor.position+1:0)+" / "+editor.total;font.pixelSize:13;font.weight:Font.Medium;color:"#69767b";Layout.minimumWidth:40;horizontalAlignment:Text.AlignHCenter}
         UiButton {iconName:"forward";hint:"下一张";Accessible.name:hint;quiet:true;implicitWidth:32;enabled:editor.position<editor.total-1&&!backend.busy;onClicked:{editor.flushDraft();editor.next()}}
         Text {text:editor.asset.name||"没有图片";elide:Text.ElideMiddle;Layout.fillWidth:true;font.pixelSize:13;font.weight:Font.Medium;color:"#263238"}
-        UiButton {text:"−";hint:"缩小预览，不改变裁剪尺寸";Accessible.name:"缩小预览";quiet:true;implicitWidth:30;enabled:!editor.isVideo&&editor.zoom>1;onClicked:canvas.zoomAt(editor.zoom/1.25,canvas.width/2,canvas.height/2,false)}
-        UiButton {text:editor.zoom===1?"适合窗口":Number(editor.zoom.toFixed(2))+"×";hint:"双击图片切换铺满／适合窗口；Ctrl + 滚轮缩放；放大后可按住鼠标中键拖动画面";Accessible.name:"适合窗口，重置预览缩放";quiet:true;onClicked:canvas.resetZoom()}
-        UiButton {text:"+";hint:"放大预览，不改变裁剪尺寸";Accessible.name:"放大预览";quiet:true;implicitWidth:30;enabled:!editor.isVideo&&editor.zoom<canvas.maximumZoom;onClicked:canvas.zoomAt(editor.zoom*1.25,canvas.width/2,canvas.height/2,false)}
         UiButton {text:"打开所在目录";iconName:"folderOpen";hint:"在文件资源管理器中打开当前文件所在目录";quiet:true;enabled:!!editor.asset.path;onClicked:backend.reveal(editor.asset.path)}
         UiButton {objectName:"editorMediaAction";iconName:editor.isVideo?(player.playbackState===MediaPlayer.PlayingState?"pause":"play"):"crop";text:editor.isVideo?(player.playbackState===MediaPlayer.PlayingState?"暂停视频":"播放视频"):"裁剪 / 旋转";hint:editor.isVideo?text:editor.cropActive?"关闭裁剪模式，保留调整并记住此选择":"开启裁剪模式，并记住此选择";chosen:editor.cropActive&&!editor.isVideo;enabled:!!editor.asset.id;onClicked:{if(editor.isVideo)editor.toggleVideoPlayback();else editor.setCropMode(!editor.cropActive)}}
     }
@@ -162,24 +167,42 @@ ColumnLayout {
         Rectangle {
             Layout.fillWidth:true;Layout.fillHeight:true;color:"#181d20";clip:true
             PhotoViewport {
-                id:canvas;objectName:"photoViewport";anchors.fill:parent;anchors.margins:10;anchors.bottomMargin:filmstrip.height+10;visible:!editor.isVideo
+                id:canvas;objectName:"photoViewport";anchors.fill:parent
+                // Browsing uses the full viewport; crop handles need room at the image edges.
+                anchors.margins:editor.cropActive?10:0
+                anchors.bottomMargin:filmstrip.height+(editor.cropActive?10:0);visible:!editor.isVideo
                 imageWidth:editor.canvasWidth;imageHeight:editor.canvasHeight
-                gesturesEnabled:editor.activeView&&editor.previewReady&&!editor.isVideo&&!livePreview.playing&&!backend.busy
+                gesturesEnabled:editor.activeView&&editor.previewReady&&!preview.slideRunning&&!editor.isVideo&&!livePreview.playing&&!backend.busy
                 Item {
                     id:frame;width:canvas.contentWidth;height:canvas.contentHeight
                     RotatingPreview {
                         id:preview;objectName:"rotationPreview";anchors.fill:parent
+                        // Move only the rendered photo; keep the pointer's coordinates and crop geometry stable.
+                        gestureOffset:previewPointer.visualOffset
+                        transform:Translate {x:preview.presentationOffset}
                         source:editor.asset.id&&!editor.isVideo?"image://media/"+editor.asset.id+"/0/detail/"+editor.asset.mtime:""
                         previewZoom:editor.zoom
+                        shareDecodedImage:true
                         angle:editor.angle;sourceWidth:editor.dimensions.width||1;sourceHeight:editor.dimensions.height||1
                         canvasWidth:editor.canvasWidth;canvasHeight:editor.canvasHeight
                         imageCenterX:editor.imageCenterX;imageCenterY:editor.imageCenterY
                     }
-                    MouseArea {
+                    PhotoSwipeArea {
                         id:previewPointer;objectName:"previewPointer";anchors.fill:parent
-                        enabled:canvas.gesturesEnabled;acceptedButtons:Qt.LeftButton
-                        cursorShape:editor.zoom>1?(pressed?Qt.ClosedHandCursor:Qt.OpenHandCursor):Qt.ArrowCursor
-                        onDoubleClicked:mouse=>editor.toggleZoomFrom(previewPointer,mouse.x,mouse.y)
+                        enabled:canvas.gesturesEnabled
+                        navigationEnabled:enabled&&!backend.cropMode&&editor.zoom<=1.000001
+                        zoomed:editor.zoom>1.000001
+                        canPrevious:editor.position>0;canNext:editor.position<editor.total-1
+                        assetKey:editor.loadedVersion
+                        imageBounds:Qt.rect((width-preview.paintedWidth)/2,(height-preview.paintedHeight)/2,preview.paintedWidth,preview.paintedHeight)
+                        onNavigate:direction=>{
+                            if(!editor.flushDraft())return
+                            const previousVersion=editor.loadedVersion
+                            preview.holdSwipePosition()
+                            if(direction<0)editor.previous();else editor.next()
+                            if(editor.loadedVersion===previousVersion)preview.clearSwipePosition()
+                        }
+                        onZoomRequested:(x,y)=>editor.toggleZoomFrom(previewPointer,x,y)
                     }
                     Item {
                         objectName:"cropOutsideShade";anchors.fill:parent;visible:cropBox.visible
@@ -304,7 +327,7 @@ ColumnLayout {
                 onBeforePlay:{editor.flushDraft();editor.invalidateSuggestion()}
             }
             Image {objectName:"editorVideoCover";anchors.fill:video;visible:editor.isVideo&&player.playbackState===MediaPlayer.StoppedState;source:editor.isVideo?(editor.asset.thumb||""):"";asynchronous:true;sourceSize.width:960;fillMode:Image.PreserveAspectFit}
-            MediaPlayer {id:player;objectName:"editorVideoPlayer";source:editor.isVideo?(editor.asset.url||""):"";audioOutput:AudioOutput {id:videoSound;objectName:"editorVideoAudio";muted:true} videoOutput:video;onSourceChanged:videoSound.muted=true;onErrorOccurred:(error,errorString)=>editor.notice("视频播放失败："+errorString)}
+            MediaPlayer {id:player;objectName:"editorVideoPlayer";source:editor.videoSource;audioOutput:AudioOutput {id:videoSound;objectName:"editorVideoAudio";muted:true} videoOutput:video;onSourceChanged:videoSound.muted=true;onErrorOccurred:(error,errorString)=>editor.notice("视频播放失败："+errorString)}
             VideoOutput {id:video;anchors.fill:parent;anchors.bottomMargin:filmstrip.height;visible:editor.isVideo&&player.playbackState!==MediaPlayer.StoppedState;fillMode:VideoOutput.PreserveAspectFit}
             MouseArea {
                 objectName:"editorVideoClickArea";anchors.fill:video
@@ -318,7 +341,7 @@ ColumnLayout {
                 implicitWidth:36;implicitHeight:32;visible:editor.isVideo&&player.hasAudio
                 iconName:videoSound.muted?"muted":"volume"
                 hint:videoSound.muted?"开启视频声音":"静音";Accessible.name:hint
-                background:Rectangle {radius:8;color:videoSoundButton.down?"#cce0eee8":videoSoundButton.pointerHovered?"#ccf5faf8":"#99f5f7f6";border.width:1;border.color:"#33ffffff"}
+                background:Rectangle {radius:8;color:videoSoundButton.down?Theme.alpha(Theme.soft,.8):videoSoundButton.pointerHovered?"#ccf5faf8":"#99f5f7f6";border.width:1;border.color:"#33ffffff"}
                 onClicked:videoSound.muted=!videoSound.muted
             }
             UiButton {
@@ -326,7 +349,7 @@ ColumnLayout {
                 visible:editor.isVideo&&player.playbackState!==MediaPlayer.PlayingState;hint:"播放视频";Accessible.name:hint
                 contentItem:Item {Glyph {anchors.centerIn:parent;width:30;height:30;name:"play";ink:"white"}}
                 background:Rectangle {radius:32;color:videoPlay.down?"#d920292d":videoPlay.pointerHovered?"#b320292d":"#8020292d";border.width:1;border.color:"#55ffffff"}
-                onClicked:player.play()
+                onClicked:editor.playVideo()
             }
             UiSlider {objectName:"editorVideoSeek";Accessible.name:"视频播放进度";visible:editor.isVideo;anchors.bottom:parent.bottom;anchors.left:parent.left;anchors.right:parent.right;anchors.margins:15;anchors.bottomMargin:filmstrip.height+15;from:0;to:Math.max(1,player.duration);value:player.position;onMoved:player.setPosition(value)}
             ThumbnailStrip {
@@ -347,7 +370,7 @@ ColumnLayout {
                 ColumnLayout {
                     width:tools.availableWidth;spacing:6;enabled:editor.previewReady
                     RowLayout {Layout.fillWidth:true;spacing:8
-                        Glyph {name:"crop";width:17;height:17;ink:"#16756a"}
+                        Glyph {name:"crop";width:17;height:17;ink:Theme.primary}
                         Text {text:"裁剪与旋转";font.pixelSize:14;font.weight:Font.DemiBold;color:"#263238";Layout.fillWidth:true}
                         UiButton {objectName:"closeCropTools";iconName:"close";quiet:true;hint:"关闭裁剪模式，保留调整并记住此选择";Accessible.name:hint;implicitWidth:26;implicitHeight:26;onClicked:editor.setCropMode(false)}
                     }
@@ -361,10 +384,10 @@ ColumnLayout {
                                 ToolTip.visible:smartPointer.containsMouse;ToolTip.text:Accessible.description;ToolTip.delay:600
                                 implicitHeight:28;spacing:8;padding:0
                                 indicator:Rectangle {x:0;y:(smartToggle.height-height)/2;width:18;height:18;radius:5
-                                    color:smartToggle.checked?"#16756a":smartPointer.containsMouse?"#edf1f2":"white"
-                                    border.color:smartToggle.checked?"#16756a":"#b9c5c9"
+                                    color:smartToggle.checked?Theme.primary:smartPointer.containsMouse?"#edf1f2":"white"
+                                    border.color:smartToggle.checked?Theme.primary:"#b9c5c9"
                                     Glyph {anchors.centerIn:parent;name:"check";width:14;height:14;visible:smartToggle.checked;ink:"white"}
-                                    Rectangle {anchors.fill:parent;anchors.margins:-3;radius:8;color:"transparent";border.color:"#16756a";border.width:2;visible:smartToggle.visualFocus}
+                                    Rectangle {anchors.fill:parent;anchors.margins:-3;radius:8;color:"transparent";border.color:Theme.primary;border.width:2;visible:smartToggle.visualFocus}
                                 }
                                 contentItem:Text {text:smartToggle.text;leftPadding:26;verticalAlignment:Text.AlignVCenter;font.pixelSize:13;font.weight:Font.Medium;color:"#263238"}
                                 MouseArea {id:smartPointer;anchors.fill:parent;hoverEnabled:true;acceptedButtons:Qt.NoButton;cursorShape:smartToggle.enabled?Qt.PointingHandCursor:Qt.ArrowCursor}
@@ -392,24 +415,11 @@ ColumnLayout {
                             UiButton {
                                 required property var modelData;required property int index
                                 objectName:"cropDraftTab"+index;width:56;height:28;text:"区域 "+(index+1);quiet:true;chosen:editor.selectedDraft===index
-                                hint:"裁剪区域 "+(index+1)+" · 导出 PNG\n归类目录："+(modelData.target||"尚未选择")+"\n旋转角度："+Number(modelData.angle).toFixed(1)+"°"
+                                hint:"裁剪区域 "+(index+1)+"\n旋转角度："+Number(modelData.angle).toFixed(1)+"°"
                                 onClicked:editor.selectDraft(index)
                             }
                         }
                         UiButton {objectName:"addCropDraft";width:28;height:28;iconName:"plus";hint:"添加裁剪区域，用于生成另一张子图";Accessible.name:hint;onClicked:editor.addDraft()}
-                    }
-                    Rectangle {
-                        Layout.fillWidth:true;implicitHeight:34;radius:6;color:"#edf1f2"
-                        RowLayout {anchors.fill:parent;anchors.leftMargin:9;anchors.rightMargin:9;spacing:7
-                            Glyph {name:"folder";width:15;height:15;ink:"#69767b"}
-                            Text {
-                                objectName:"selectedCropTarget";Layout.fillWidth:true;elide:Text.ElideMiddle;font.pixelSize:12;color:"#4e5b62"
-                                readonly property string destination:editor.selectedDraft>=0&&editor.drafts[editor.selectedDraft]?editor.drafts[editor.selectedDraft].target||"":""
-                                text:destination?"归类到："+(destination.replace(/\\/g,"/").split("/").filter(p=>p).pop()||destination):"未选目录 · 可先仅裁剪"
-                                ToolTip.visible:targetHover.hovered;ToolTip.text:destination?"裁剪并归类时保存到："+destination+"\n仅裁剪会保存到原图所在目录":text;ToolTip.delay:500
-                                HoverHandler {id:targetHover}
-                            }
-                        }
                     }
                     Rectangle {Layout.fillWidth:true;Layout.topMargin:4;Layout.bottomMargin:4;implicitHeight:1;color:"#e3e7e9"}
                     Text {text:"画幅比例";font.pixelSize:14;font.weight:Font.DemiBold;color:"#263238"}
@@ -425,22 +435,22 @@ ColumnLayout {
                                 onClicked:editor.setRatio(modelData.r)
                                 background:Rectangle {
                                     radius:7
-                                    color:ratioButton.chosen?(ratioButton.down?"#c9e2dd":"#e0eeeb"):ratioButton.down?"#e5eaec":ratioButton.pointerHovered?"#eff2f3":"transparent"
-                                    border.width:ratioButton.activeFocus?1:0;border.color:"#81aea7"
+                                    color:ratioButton.chosen?(ratioButton.down?Theme.softHover:Theme.soft):ratioButton.down?"#e5eaec":ratioButton.pointerHovered?"#eff2f3":"transparent"
+                                    border.width:ratioButton.activeFocus?1:0;border.color:Theme.focus
                                 }
                                 contentItem:Item {
                                     Column {anchors.centerIn:parent;spacing:0;scale:ratioButton.down?.96:1
-                                        Image {
+                                        ThemedIcon {
                                             anchors.horizontalCenter:parent.horizontalCenter
                                             width:23;height:23;sourceSize:Qt.size(46,46)
                                             opacity:ratioButton.chosen||ratioButton.pointerHovered||ratioButton.activeFocus?1:.65
-                                            source:Qt.resolvedUrl("icons/crop-"+ratioButton.modelData.icon+".svg")
+                                            name:"crop-"+ratioButton.modelData.icon
                                         }
                                         Text {
                                             anchors.horizontalCenter:parent.horizontalCenter
                                             text:ratioButton.text;font.pixelSize:11
                                             font.weight:ratioButton.chosen?Font.DemiBold:Font.Normal
-                                            color:ratioButton.chosen?"#16756a":"#69767b"
+                                            color:ratioButton.chosen?Theme.primary:"#69767b"
                                         }
                                     }
                                 }
@@ -472,18 +482,18 @@ ColumnLayout {
                                 onClicked:editor.angle=(editor.angle+modelData.angle)%360
                                 background:Rectangle {
                                     color:rotateButton.down?"#e0e8e9":rotateButton.pointerHovered?"#edf1f2":"transparent";radius:6
-                                    border.width:rotateButton.activeFocus?1:0;border.color:"#81aea7"
+                                    border.width:rotateButton.activeFocus?1:0;border.color:Theme.focus
                                 }
                                 contentItem:Item {
                                     Row {anchors.centerIn:parent;spacing:7;scale:rotateButton.down?.96:1
-                                        Image {width:20;height:20;sourceSize:Qt.size(40,40);source:Qt.resolvedUrl("icons/"+rotateButton.modelData.icon+".svg");opacity:rotateButton.pointerHovered||rotateButton.activeFocus?1:.8}
-                                        Text {anchors.verticalCenter:parent.verticalCenter;text:rotateButton.text;font.pixelSize:12;color:rotateButton.pointerHovered||rotateButton.down?"#16756a":"#69767b"}
+                                        ThemedIcon {width:20;height:20;sourceSize:Qt.size(40,40);name:rotateButton.modelData.icon;opacity:rotateButton.pointerHovered||rotateButton.activeFocus?1:.8}
+                                        Text {anchors.verticalCenter:parent.verticalCenter;text:rotateButton.text;font.pixelSize:12;color:rotateButton.pointerHovered||rotateButton.down?Theme.primary:"#69767b"}
                                     }
                                 }
                             }
                         }
                     }
-                    Text {text:"裁剪后另存为 PNG，保留原图";Layout.fillWidth:true;Layout.topMargin:3;font.pixelSize:11;color:"#839095"}
+                    Text {text:"裁剪结果保存在原目录，可随后移动或复制";Layout.fillWidth:true;Layout.topMargin:3;font.pixelSize:11;color:"#839095"}
                 }
             }
         }

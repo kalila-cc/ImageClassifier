@@ -12,6 +12,12 @@ ListView {
     property string contextPath: ""
     property string contextName: ""
     property string retainedRootPath: ""
+    property var countChanges: ({})
+    function showCountChanges(changes) {
+        countChanges = changes
+        countChangeTimer.restart()
+    }
+    Timer {id:countChangeTimer;objectName:"directoryCountChangeTimer";interval:6000;onTriggered:tree.countChanges=({})}
     signal directorySelected(string path)
     signal selectionGestureStarted()
     signal selectionGestureReverted()
@@ -20,6 +26,7 @@ ListView {
     signal renameDirectoryRequested(string path,string name)
     signal directoryRevealRequested(string path)
     onRootPathChanged: {
+        countChangeTimer.stop(); countChanges = ({})
         if (rootPath !== retainedRootPath) collapsedPaths = ({})
         retainedRootPath = ""
     }
@@ -86,12 +93,23 @@ ListView {
     spacing: 2
     ScrollBar.vertical: ScrollBar {}
     delegate: Rectangle {
+        id: directoryRow
+        objectName:"directoryRow"
+        readonly property bool selected:tree.selectedPath===modelData.path
+        readonly property real selectionTint:enabled&&dirMouse.pressed ? .66 : enabled&&dirMouse.containsMouse ? .72 : .78
+        readonly property color selectionInk:Theme.readableInk(color,Theme.gradient?Theme.mix(Theme.secondary,Qt.rgba(1,1,1,1),selectionTint):color)
+        gradient: Theme.gradient&&tree.selectedPath===modelData.path?directoryGradient:null
+        Gradient {id:directoryGradient;orientation:Gradient.Horizontal
+            GradientStop {position:0;color:directoryRow.color}
+            GradientStop {position:1;color:Theme.mix(Theme.secondary,Qt.rgba(1,1,1,1),directoryRow.selectionTint)}
+        }
         required property var modelData
+        readonly property int countDelta: Number(tree.countChanges[modelData.path] || 0)
         width: ListView.view.width
         height: 37
         radius: 5
-        color: enabled && dirMouse.pressed ? "#c6ddd8" : enabled && dirMouse.containsMouse ? "#e1e7e9" : tree.selectedPath === modelData.path ? "#dcece8" : "transparent"
-        Rectangle {anchors.left:parent.left;anchors.verticalCenter:parent.verticalCenter;width:3;height:19;radius:2;color:"#16756a";visible:tree.selectedPath===modelData.path}
+        color: selected ? Theme.mix(Theme.primary,Qt.rgba(1,1,1,1),selectionTint) : enabled && dirMouse.pressed ? Theme.softPressed : enabled && dirMouse.containsMouse ? "#e1e7e9" : "transparent"
+        Rectangle {anchors.left:parent.left;anchors.verticalCenter:parent.verticalCenter;width:3;height:19;radius:2;color:Theme.primary;visible:tree.selectedPath===modelData.path}
         MouseArea {
             id: dirMouse
             anchors.fill: parent
@@ -137,14 +155,23 @@ ListView {
                     onClicked: tree.toggleDirectory(modelData.path)
                 }
             }
-            Glyph {name: "folder"; width: 16; height: 16; ink: "#74868d"}
+            Glyph {name: "folder"; width: 16; height: 16; ink:directoryRow.selected?directoryRow.selectionInk:"#74868d"}
             Column {
                 Layout.fillWidth:true;Layout.minimumWidth:0;spacing:0
-                Text {width:parent.width;text:modelData.depth===0?(modelData.path.replace(/\\/g,"/").split("/").filter(p=>p).pop()||modelData.name):modelData.name;elide:Text.ElideMiddle;font.pixelSize:13;font.weight:tree.selectedPath===modelData.path?Font.DemiBold:Font.Normal;color:tree.selectedPath===modelData.path?"#126257":"#3a4c54"}
+                Text {width:parent.width;text:modelData.depth===0?(modelData.path.replace(/\\/g,"/").split("/").filter(p=>p).pop()||modelData.name):modelData.name;elide:Text.ElideMiddle;font.pixelSize:13;font.weight:tree.selectedPath===modelData.path?Font.DemiBold:Font.Normal;color:directoryRow.selected?directoryRow.selectionInk:"#3a4c54"}
                 Text {visible:tree.workingPath===modelData.path;text:"浏览中";font.pixelSize:10;color:"#71828a"}
             }
-            Rectangle {Layout.preferredWidth:Math.max(25,countLabel.implicitWidth+12);Layout.preferredHeight:21;radius:5;color:tree.selectedPath===modelData.path?"#c5ded6":"#e3e8eb"
-                Text {id:countLabel;anchors.centerIn:parent;text:modelData.mediaCount>=0?modelData.mediaCount:"…";font.pixelSize:11;color:tree.selectedPath===modelData.path?"#126257":"#677780"}
+            Rectangle {Layout.preferredWidth:Math.max(25,countLabel.implicitWidth+12);Layout.preferredHeight:21;radius:5;color:directoryRow.selected?"#b3ffffff":"#e3e8eb"
+                Text {id:countLabel;anchors.centerIn:parent;text:modelData.mediaCount>=0?modelData.mediaCount:"…";font.pixelSize:11;color:directoryRow.selected?directoryRow.selectionInk:"#677780"}
+            }
+            Text {
+                objectName:"directoryCountDelta"
+                property string directoryPath:modelData.path
+                visible:directoryRow.countDelta!==0
+                text:"("+(directoryRow.countDelta>0?"+":"")+directoryRow.countDelta+")"
+                color:directoryRow.countDelta>0?"#16804a":"#c33e3e"
+                font.pixelSize:11;font.weight:Font.DemiBold
+                Accessible.name:(directoryRow.countDelta>0?"本次增加 ":"本次减少 ")+Math.abs(directoryRow.countDelta)+" 项"
             }
         }
         ToolTip.visible: dirMouse.containsMouse

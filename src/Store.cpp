@@ -25,6 +25,9 @@ Store::Store(const QString &path) {
     exec("CREATE TABLE IF NOT EXISTS drafts(asset TEXT PRIMARY KEY,stamp TEXT NOT NULL,json TEXT NOT NULL)");
     exec("CREATE TABLE IF NOT EXISTS live_metadata(path TEXT PRIMARY KEY,size INTEGER,mtime INTEGER,identifier TEXT NOT NULL)");
     exec("CREATE TABLE IF NOT EXISTS live_members(group_id TEXT,position INTEGER,source TEXT,target TEXT,sha TEXT,size INTEGER,mtime INTEGER,identity TEXT,PRIMARY KEY(group_id,position))");
+    exec("CREATE TABLE IF NOT EXISTS recycle_members(group_id TEXT,position INTEGER,source TEXT,sha TEXT,size INTEGER,mtime INTEGER,identity TEXT,trash TEXT DEFAULT '',state TEXT DEFAULT 'planned',PRIMARY KEY(group_id,position))");
+    exec("CREATE TABLE IF NOT EXISTS recycle_outputs(group_id TEXT,operation TEXT,PRIMARY KEY(group_id,operation))");
+    exec("CREATE TABLE IF NOT EXISTS image_replacements(operation TEXT PRIMARY KEY,source_sha TEXT NOT NULL,backup TEXT NOT NULL)");
     exec("PRAGMA user_version=1");
 }
 Store::~Store() { db.close(); db = QSqlDatabase(); QSqlDatabase::removeDatabase(connection); }

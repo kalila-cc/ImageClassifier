@@ -3,6 +3,8 @@ Canvas {
     id: icon
     property string name: "folder"
     property color ink: "#687a82"
+    property real strokeWidth: 1.6
+    onStrokeWidthChanged: requestPaint()
     width: 20; height: 20
     onWidthChanged: requestPaint()
     onHeightChanged: requestPaint()
@@ -10,7 +12,7 @@ Canvas {
     onNameChanged: requestPaint()
     onPaint: {
         const c = getContext("2d"); c.reset(); c.scale(width/24, height/24);
-        c.strokeStyle = ink; c.lineWidth = 1.6; c.lineCap = "round"; c.lineJoin = "round";
+        c.strokeStyle = ink; c.lineWidth = icon.strokeWidth; c.lineCap = "round"; c.lineJoin = "round";
         c.beginPath();
         if (name === "folder") { c.moveTo(3,6); c.lineTo(9,6); c.lineTo(11,9); c.lineTo(21,9); c.lineTo(21,20); c.lineTo(3,20); c.closePath(); }
         else if(name === "grid") { for(let y=4;y<20;y+=10) for(let x=4;x<20;x+=10) c.rect(x,y,6,6); }
